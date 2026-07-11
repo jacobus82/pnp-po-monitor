@@ -1,0 +1,186 @@
+# pnp-po-monitor
+
+SAP purchase-order ingestion and anomaly monitoring on Cloudflare Workers.
+
+**Store:** Dolly's Supermarket (Pty) Ltd t/a **Pick n Pay Lydenburg** — store **2516**, site **NF16**, owner Jacobus Pretorius.
+
+Upload a SAP PO export → the file is archived in **R2**, parsed, and exploded into
+`po_lines` in **D1** with deduped `vendors`/`articles` masters. Each ingest runs an
+anomaly pass (stale open orders, price spikes, over-budget, missing data, duplicates)
+and re-evaluates budget traffic-lights.
+
+## Architecture
+
+```
+client ──POST /api/uploads──▶ Worker
+                               ├─ R2  (raw file archive: UPLOADS_BUCKET)
+                               └─ D1  (DB): uploads · vendors · articles · po_lines · budgets · anomalies
+```
+
+| File | Role |
+|------|------|
+| `wrangler.toml` | Worker config + D1/R2 bindings + store vars |
+| `schema/0001_init.sql` | D1 schema (uploads, vendors, articles, po_lines, budgets, anomalies) |
+| `schema/0002_gr_lines.sql` | Goods-receipt lines + upload `kind` |
+| `schema/0003_fim.sql` | FIM daily department performance + dept margin guidelines (seeded) |
+| `src/index.ts` | HTTP router + ingest pipeline + dashboard aggregate |
+| `src/dashboard.ts` | Self-contained HTML dashboard page (served at `/`) |
+| `src/parser/core.ts` | Shared parser primitives (delimiter, number/date, header mapping) |
+| `src/parser/sapParser.ts` | SAP PO export parser |
+| `src/parser/grParser.ts` | Goods-receipt parser (dept + cost/sell/margin) |
+| `src/parser/fimParser.ts` | FIM xlsx parser (dept-level rows, SheetJS) |
+| `src/fiscal.ts` | PnP fiscal calendar (March–February year, Monday weeks) |
+| `src/guidelines.ts` | Departmental guideline lookup (effective-dated) |
+| `src/departments.ts` | Department master (`Z1/…` codes → names) |
+| `src/db/repo.ts` | D1 read/write helpers |
+| `src/anomalies/detect.ts` | Anomaly + budget-status engine (PO, GR margin, FIM) |
+
+## Setup
+
+```bash
+npm install
+
+# 1. Create the D1 database, then paste the printed database_id into wrangler.toml
+npm run db:create
+
+# 2. Create the R2 bucket
+npm run r2:create
+
+# 3. Apply the schema (local dev DB, then remote when ready)
+npm run db:migrate:local
+npm run db:migrate:remote
+
+# 4. Run locally
+npm run dev
+```
+
+Then open **http://localhost:8787/** for the dashboard (budget traffic-lights, open-order
+aging, KPIs, open anomalies, recent uploads). It refreshes from `GET /api/dashboard`.
+
+## Usage
+
+```bash
+# Ingest a SAP export (raw text body)
+curl -X POST "http://localhost:8787/api/uploads?filename=me2m.tsv" \
+  --data-binary @schema/sample-sap-export.tsv
+
+# Or multipart
+curl -X POST http://localhost:8787/api/uploads -F "file=@schema/sample-sap-export.tsv"
+
+# Ingest a goods-receipt file (→ gr_lines)
+curl -X POST http://localhost:8787/api/gr-uploads -F "file=@schema/sample-gr-export.csv"
+curl "http://localhost:8787/api/gr-lines?dept=Z1/G14"   # filter by department
+
+# Define a budget (R250 000 overall for June 2026)
+curl -X POST http://localhost:8787/api/budgets \
+  -H 'content-type: application/json' \
+  -d '{"period":"2026-06","scopeType":"overall","capRands":250000}'
+
+# Inspect
+curl http://localhost:8787/api/uploads
+curl http://localhost:8787/api/po-lines?status=open
+curl http://localhost:8787/api/anomalies?severity=CRITICAL
+curl http://localhost:8787/api/budget
+```
+
+## Budget status (traffic light)
+
+Committed value = sum of `open_value_cents` for non-closed lines (scoped overall / by department / by vendor).
+
+| Status | Used vs cap |
+|--------|-------------|
+| 🟢 GREEN | < 85% |
+| 🟡 AMBER | 85–95% |
+| 🟠 TIGHT | 95–100% |
+| 🔴 OVER | > 100% |
+
+Thresholds are tunable in `wrangler.toml` (`BUDGET_*_THRESHOLD`).
+
+## SAP file format
+
+The parser is **column-name driven**, not position driven. It auto-detects the
+delimiter (tab / `;` / `|` / `,`) and maps source columns to canonical fields via a
+synonym table. Supported labels include both descriptive headers
+("Purchasing Document", "Net Price", "Still to be delivered (qty)") and SAP technical
+field names (`EBELN`, `LIFNR`, `MATNR`, `NETPR`, `EINDT`, …).
+
+If your real export uses different headers, extend `COLUMN_SYNONYMS` at the top of
+`src/parser/sapParser.ts` — that is the single place column naming is configured.
+Fixed-width (no-delimiter) exports are detected but not yet parsed.
+
+> ⚠️ The sample file (`schema/sample-sap-export.tsv`) is a **best-guess layout**.
+> Drop a real SAP export in and check the `mappedColumns` field in the upload
+> response to confirm the column mapping before trusting the data.
+
+## Goods receipts & departments
+
+`POST /api/gr-uploads` parses a GR export into `gr_lines`
+`(upload_id, po_number, article_code, article_desc, dept_code, dept_name, qty, cost_zar, sell_zar, margin_pct, gr_date)`.
+`margin_pct` is derived as `(sell − cost) / sell × 100` when not supplied. Department
+names are resolved from the code via `src/departments.ts`; a bare suffix (`G14`) or
+`Z1/G14` both resolve to **Liquor**. The upload response includes a per-department
+cost/sell/margin roll-up. `uploads.kind` is `'po'`, `'gr'`, or `'fim'`.
+
+Departments: `Z1/F53` Convenience · `Z1/F55` Outsourced Bakery · `Z1/G12` Edible Groceries ·
+`Z1/G13` Non-Edible · `Z1/G14` Liquor · `Z1/G15` Toiletries · `Z1/G99` Bottle Returns ·
+`Z1/M83` Outdoor · `Z1/M85` Office · `Z1/M88` Home · `Z1/P11` Perishable Groceries.
+
+## Dashboard refresh
+
+The dashboard auto-refreshes every 60 s (single re-armed timer, pauses while the tab
+is hidden) and shows a "Last updated HH:MM:SS · data as at …" stamp top-right.
+
+## Anomaly types
+
+| Type | Trigger |
+|------|---------|
+| `STALE_OPEN_ORDER` | Open line ≥ `STALE_OPEN_ORDER_DAYS` past delivery date |
+| `PRICE_SPIKE` | Net price moved ≥ `price_alert_threshold_pct` (default 5%) vs last seen price for the article (CRITICAL at ≥ 2×). Detected per-line on full-path uploads, and via `POST /api/reconcile/recompute` for fast/batch uploads |
+| `OVER_BUDGET` | A budget reached TIGHT or OVER status |
+| `OVER_DELIVERY` | Goods received > ordered quantity |
+| `MISSING_PRICE` / `MISSING_VENDOR` | Required field absent |
+| `NEGATIVE_VALUE` | Negative qty or value |
+| `DUPLICATE_PO_LINE` | Same PO+item appears twice in one file |
+| `NEGATIVE_MARGIN` | GR line margin < 0% (loss-making receipt) — CRITICAL |
+| `LOW_MARGIN` | GR line margin < 5% floor, or > 10pp below the dept guideline |
+| `FIM_MARGIN_BELOW_GUIDELINE` | POS margin < guideline−5pp (CRITICAL) / < guideline−2pp (WARN) |
+| `FIM_HIGH_WASTE` / `FIM_HIGH_SHRINK` | Waste > 5% / shrink > 3% of net sales |
+| `FIM_PARTICIPATION_DEVIATION` | Sales share differs > 3pp from participation guideline |
+
+> **F06 Instore Bakery & F09 Butchery** carry in-store production distortion on any
+> single day (receipts and sales land on different dates), so their FIM findings are
+> logged as **INFO** until the whole fiscal week (all 7 days) is present — then they
+> escalate to WARN/CRITICAL.
+
+## FIM & margin guidelines
+
+`POST /api/fim-uploads` ingests a daily FIM spreadsheet (`.xlsx`, filename
+`FIM_YYYY-MM-DD.xlsx`). Only **department-level** rows are kept (column 0 is a short
+code like `F09`, `G12`, `P11`); article rows (6+ digit codes) are skipped, and the
+"Overall Result" line is stored as `dept_code = 'TOTAL'`. Each row is stamped with the
+PnP **fiscal calendar** (March–February year, Monday-anchored weeks) and upserted into
+`fim_daily` on `(report_date, dept_code)`.
+
+Official departmental targets live in `dept_guidelines` (seeded effective `2026-03-01`,
+grouped Non-Fresh / Fresh-A / Fresh-B) with effective-dated history.
+
+```bash
+# Ingest a daily FIM
+curl -X POST http://localhost:8787/api/fim-uploads -F "file=@schema/sample-fim-export.xlsx;filename=FIM_2026-06-13.xlsx"
+
+# Guidelines: current, history, and effective-dated update
+curl http://localhost:8787/api/guidelines
+curl http://localhost:8787/api/guidelines/F09/history
+curl -X PUT http://localhost:8787/api/guidelines/F09 \
+  -H 'content-type: application/json' -d '{"guideline_margin_pct":20.5,"effective_from":"2026-09-01"}'
+
+# FIM rollups
+curl "http://localhost:8787/api/fim/summary?fy=2027&quarter=2&week=16"
+curl http://localhost:8787/api/fim/departments     # latest margin per dept vs guideline
+curl "http://localhost:8787/api/fim/trend?dept=F09" # weekly rollup for sparklines
+```
+
+The dashboard adds a **GR / Margin** panel (latest goods-receipt blended margin +
+per-dept vs-guideline breakdown with inline margin flags) and a **Margin performance**
+section (departments grouped Non-Fresh / Fresh-A / Fresh-B, actual-vs-guideline margin
+and participation bars, worst performer per group highlighted).

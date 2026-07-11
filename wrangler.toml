@@ -1,0 +1,35 @@
+name = "pnp-po-monitor"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Raise the per-invocation CPU ceiling to the platform max (5 min) so large
+# bulk PO slice loads don't 503 on CPU timeout. Requires the Workers Paid plan
+# (rejected with code 100328 on Free). Uncomment after upgrading the account.
+# [limits]
+# cpu_ms = 300000
+
+# Store identity lives in the STORE constant in src/config.ts (single source of
+# truth); it is not duplicated here as vars.
+[vars]
+DEFAULT_CURRENCY = "ZAR"
+# Budget status thresholds (fraction of cap used).
+BUDGET_AMBER_THRESHOLD = "0.85"
+BUDGET_TIGHT_THRESHOLD = "0.95"
+BUDGET_OVER_THRESHOLD = "1.00"
+
+[observability]
+enabled = true
+
+# --- D1 (relational store: uploads, po_lines, vendors, articles, anomalies, budgets) ---
+# Run `npm run db:create`, then paste the returned database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "pnp-po-monitor-db"
+database_id = "81aa37f2-a711-435d-8e70-2c0432bdcd1e"
+
+# --- R2 (raw SAP file archive) ---
+# Run `npm run r2:create` to create the bucket.
+[[r2_buckets]]
+binding = "UPLOADS_BUCKET"
+bucket_name = "pnp-po-uploads"

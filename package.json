@@ -1,0 +1,25 @@
+{
+  "name": "pnp-po-monitor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SAP purchase-order ingestion and anomaly monitoring for Pick n Pay Lydenburg (store 2516)",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:create": "wrangler d1 create pnp-po-monitor-db",
+    "db:migrate:local": "wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0001_init.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0002_gr_lines.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0003_fim.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0004_app.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0005_history.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0006_fiscal_hierarchy.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0007_seed_calendar.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0008_seed_hierarchy.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0009_hierarchy_unique.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0010_fim_detail_cols.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0011_reconciliation.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0012_customer_counts.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0013_fan_score.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0014_weekly_budgets.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0015_weekly_budgets_v2.sql && wrangler d1 execute pnp-po-monitor-db --local --file=./schema/0016_fim_articles.sql",
+    "db:migrate:remote": "wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0001_init.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0002_gr_lines.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0003_fim.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0004_app.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0005_history.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0006_fiscal_hierarchy.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0007_seed_calendar.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0008_seed_hierarchy.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0009_hierarchy_unique.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0010_fim_detail_cols.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0011_reconciliation.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0012_customer_counts.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0013_fan_score.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0014_weekly_budgets.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0015_weekly_budgets_v2.sql && wrangler d1 execute pnp-po-monitor-db --remote --file=./schema/0016_fim_articles.sql",
+    "r2:create": "wrangler r2 bucket create pnp-po-uploads"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250601.0",
+    "sharp": "^0.35.1",
+    "typescript": "^5.5.0",
+    "wrangler": "^3.90.0"
+  },
+  "dependencies": {
+    "xlsx": "^0.18.5"
+  }
+}

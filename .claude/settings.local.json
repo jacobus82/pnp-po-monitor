@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -n \"^function R\\(\\\\|^function Rr\\(\\\\|^function Rr0\\(\\\\|function kpi\\(\\\\|function pct\\(\\\\|function num\\(\\\\|function esc\\(\\\\|function hbars\\(\\\\|function weekBounds\\(\\\\|function midTrunc\\(\\\\|function api\\(\\\\|function setHTML\\(\\\\|function loading\\(\\\\|function errBox\\\\|function isMobile\\\\|function \\\\$\\(\" src/app.ts)",
+      "PowerShell(npm run *)",
+      "Bash(awk 'NR>=1485 && NR<=1520' src/index.ts)",
+      "Bash(grep -c '`')",
+      "Bash(grep -c '\\\\${')",
+      "Bash([ -f \"$f\" ])",
+      "Read(//c/Users/jacob/Downloads/**)",
+      "Read(//c/Users/jacob/Downloads//**)"
+    ]
+  }
+}
