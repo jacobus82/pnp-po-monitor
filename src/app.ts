@@ -1929,26 +1929,32 @@ PAGES.anomalies=function(){
 };
 function ackAnom(e,id){e.stopPropagation();fetch("/api/anomalies/"+id+"/ack",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({resolved:true})}).then(function(){if(window._reloadAnom)window._reloadAnom()})}
 
+var _grFT={from:"",to:""},_grTab="gr";
 PAGES.gr=function(){
-  setHTML('<div class="tabs" id="grtabs"><button class="active" onclick="grTab(\\'gr\\')">Goods Receipts</button><button onclick="grTab(\\'recon\\')">PO Reconciliation</button></div><div id="grtabc"><div class="loading">Loading\\u2026</div></div>');
-  grTab("gr");
+  setHTML(periodPickerHTML("grPer")+'<div class="tabs" id="grtabs"><button class="active" onclick="grTab(\\'gr\\')">Goods Receipts</button><button onclick="grTab(\\'recon\\')">PO Reconciliation</button></div><div id="grtabc"><div class="loading">Loading\\u2026</div></div>');
+  initPeriodPicker("grPer",function(from,to){_grFT={from:from,to:to};grTab(_grTab)},"month");
 };
 function grTab(t){
+  _grTab=t;
   document.querySelectorAll("#grtabs button").forEach(function(b){b.classList.toggle("active",(t==="gr"&&b.textContent.indexOf("Goods")>=0)||(t==="recon"&&b.textContent.indexOf("Reconciliation")>=0))});
   var c=$("grtabc");c.innerHTML='<div class="loading">Loading\\u2026</div>';
   if(t==="recon")reconLoad(c);else grLoad(c);
 }
-function grLoad(c){Promise.all([api("/api/dashboard"),api("/api/gr/reconciliation"),api("/api/settings")]).then(function(res){
-  var d=res[0],rec=res[1],sett=res[2].settings||{};var g=d.grPanel;
-  var h="";
-  if(g){h+='<div class="cards kpis">'+kpi("GR cost",R(g.totals.costZar*100),null)+kpi("GR sell",R(g.totals.sellZar*100),null)+kpi("Blended margin",pct(g.totals.blendedMarginPct),null)+kpi("Lines",num(g.totals.lines),null)+'</div>';}
-  else h+='<div class="card"><div class="muted">No goods-receipt upload yet. Use Upload Files.</div></div>';
+function grLoad(c){
+  if(!_grFT.from||!_grFT.to){c.innerHTML='<div class="loading">Loading\\u2026</div>';return}
+  // GR cost/sell/margin + by-department now scope to the selected period (were the
+  // latest upload only). Reconciliation-vs-PO stays latest-upload; outstanding
+  // items are not period-bound.
+  Promise.all([api("/api/gr/period?from="+_grFT.from+"&to="+_grFT.to),api("/api/gr/reconciliation"),api("/api/settings")]).then(function(res){
+  var gp=res[0],rec=res[1],sett=res[2].settings||{};var t=gp.totals||{};
+  var h='<div class="cards kpis">'+kpi("GR cost",Rr0(t.costZar||0),null)+kpi("GR sell",Rr0(t.sellZar||0),null)+kpi("Blended margin",(t.blendedMarginPct!=null?t.blendedMarginPct+"%":"\\u2014"),null)+kpi("Lines",num(t.lines||0),null)+'</div>';
   var sm=rec.summary||{};
-  h+='<div class="cards g2"><div class="card"><h2>Reconciliation vs PO export</h2><div class="cards kpis">'+kpi("GR lines",num(sm.gr_lines),null)+kpi("Matched to PO",'<span class="pos">'+num(sm.matched)+'</span>',null)+kpi("Unmatched",'<span class="neg">'+num(sm.unmatched)+'</span>',null)+'</div></div>';
-  // cash outflow projection
+  h+='<div class="cards g2"><div class="card"><h2>Reconciliation vs PO export <span class="muted small">(latest upload)</span></h2><div class="cards kpis">'+kpi("GR lines",num(sm.gr_lines),null)+kpi("Matched to PO",'<span class="pos">'+num(sm.matched)+'</span>',null)+kpi("Unmatched",'<span class="neg">'+num(sm.unmatched)+'</span>',null)+'</div></div>';
   var pnp=Number(sett.pnp_terms_days||28),ven=Number(sett.vencor_terms_days||14);
   h+='<div class="card"><h2>Cash outflow projection</h2><table><tbody><tr><td>PnP Corporate</td><td class="num">'+pnp+' days after week-end</td></tr><tr><td>Vencor</td><td class="num">'+ven+' days</td></tr></tbody></table><div class="legend">Goods received this week become payable per the supplier terms above.</div></div></div>';
-  if(rec.byDept&&rec.byDept.length)h+='<div class="card" style="margin-top:14px"><h2>By department: received cost</h2>'+makeTable([{key:"dept_code",label:"Dept"},{key:"dept_name",label:"Name"},{key:"gr_lines",label:"GR lines",num:true},{key:"gr_cost",label:"Cost",num:true,fmt:function(v){return Rr(v)}},{key:"po_match",label:"PO lines (same POs)",num:true}],rec.byDept,{rowMenu:false})+'</div>';
+  var deps=gp.departments||[];
+  if(deps.length)h+='<div class="card" style="margin-top:14px"><h2>By department: received cost <span class="muted small">(selected period)</span></h2>'+makeTable([{key:"deptCode",label:"Dept"},{key:"deptName",label:"Name"},{key:"lines",label:"GR lines",num:true},{key:"costZar",label:"Cost",num:true,fmt:function(v){return Rr(v)}},{key:"sellZar",label:"Sell",num:true,fmt:function(v){return Rr(v)}},{key:"marginPct",label:"Margin",num:true,html:function(r){return r.marginPct!=null?r.marginPct.toFixed(1)+"%":"\\u2014"}}],deps,{rowMenu:false})+'</div>';
+  else h+='<div class="card" style="margin-top:14px"><div class="muted">No goods receipts in this period.</div></div>';
   c.innerHTML=h;
 }).catch(function(e){c.innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
 function reconLoad(c){api("/api/reconciliation?status=unmatched-po&limit=2000").then(function(d){
