@@ -381,16 +381,25 @@ export async function handleCategoryDetail(env: Env, code: string): Promise<Resp
 }
 
 /** GET /api/departments-po — PO purchases by department vs guideline/budget. */
-export async function handleDepartmentsPo(env: Env): Promise<Response> {
+export async function handleDepartmentsPo(req: Request, env: Env): Promise<Response> {
+  // BUG FIX: PO department values previously ignored the selected period and
+  // summed all history. Scope them by order_date when from/to are supplied.
+  const q = new URL(req.url).searchParams;
+  const where = ["p.mdse_cat IS NOT NULL", "p.mdse_cat != ''"];
+  const binds: unknown[] = [];
+  const from = q.get("from"), to = q.get("to");
+  if (from) { where.push("p.order_date >= ?"); binds.push(from); }
+  if (to) { where.push("p.order_date <= ?"); binds.push(to); }
+  const scope = "WHERE " + where.join(" AND ");
   // Heavy po_lines aggregate + light guideline lookup are independent — overlap them.
   const [rows, guides] = await Promise.all([
     env.DB.prepare(
       `SELECT substr(p.mdse_cat,1,3) dept,
             SUM(${PURCH}) purchases, SUM(${RET}) returns,
             SUM(COALESCE(p.open_value_cents,0)) open_deliver, COUNT(*) lines
-     FROM po_lines p WHERE p.mdse_cat IS NOT NULL AND p.mdse_cat != ''
+     FROM po_lines p ${scope}
      GROUP BY substr(p.mdse_cat,1,3) ORDER BY purchases DESC`,
-    ).all<{ dept: string; purchases: number; returns: number; open_deliver: number; lines: number }>(),
+    ).bind(...binds).all<{ dept: string; purchases: number; returns: number; open_deliver: number; lines: number }>(),
     env.DB.prepare(
       `SELECT dept_code, dept_name, dept_group, guideline_margin_pct FROM dept_guidelines
      WHERE effective_from = (SELECT MAX(effective_from) FROM dept_guidelines g2 WHERE g2.dept_code = dept_guidelines.dept_code)`,
@@ -1446,6 +1455,66 @@ export async function resolvePeriod(
   if (row) return { key: "week", from: row.week_start, to: row.week_end, label: fmtRangeLabel(row.week_start, row.week_end) };
   const fc = fiscalCalendar(today);
   return { key: "week", from: fc.fiscalWeekStart, to: fc.fiscalWeekEnd, label: fmtRangeLabel(fc.fiscalWeekStart, fc.fiscalWeekEnd) };
+}
+
+/**
+ * GET /api/periods — every selectable range for the shared period picker, all
+ * capped at the latest data date so "today" is never offered or included. The
+ * frontend resolves any selection straight to from/to from this payload; screens
+ * just consume from/to. Fiscal weeks are Mon–Sun (fiscal_weeks table).
+ */
+export async function handlePeriods(env: Env): Promise<Response> {
+  const latest = await latestDataDate(env);
+  const cap = (d: string) => (d > latest ? latest : d);
+  const mmdd = (iso: string) => iso.slice(5).replace("-", ".");
+
+  const [weeksRes, periodsRes, fysRes, curWk] = await Promise.all([
+    env.DB.prepare(
+      `SELECT fiscal_week_code code, week_start, week_end FROM fiscal_weeks
+       WHERE week_start <= ? ORDER BY week_start DESC LIMIT 130`,
+    ).bind(latest).all<{ code: string; week_start: string; week_end: string }>(),
+    env.DB.prepare(
+      `SELECT fiscal_period_code code, MIN(week_start) week_start, MAX(week_end) week_end
+       FROM fiscal_weeks WHERE fiscal_period_code IS NOT NULL AND week_start <= ?
+       GROUP BY fiscal_period_code ORDER BY MIN(week_start) DESC LIMIT 40`,
+    ).bind(latest).all<{ code: string; week_start: string; week_end: string }>(),
+    env.DB.prepare(
+      `SELECT fiscal_year fy, MIN(week_start) week_start, MAX(week_end) week_end
+       FROM fiscal_weeks WHERE week_start <= ? GROUP BY fiscal_year ORDER BY fiscal_year DESC`,
+    ).bind(latest).all<{ fy: number; week_start: string; week_end: string }>(),
+    env.DB.prepare(
+      `SELECT week_start, week_end FROM fiscal_weeks WHERE week_start <= ? AND week_end >= ? LIMIT 1`,
+    ).bind(latest, latest).first<{ week_start: string; week_end: string }>(),
+  ]);
+
+  const weeks = (weeksRes.results ?? []).map((w) => ({
+    code: w.code,
+    from: w.week_start,
+    to: cap(w.week_end),
+    label: `${w.code} · ${mmdd(w.week_start)}–${mmdd(w.week_end)}`,
+  }));
+  const periods = (periodsRes.results ?? []).map((p) => ({
+    code: p.code,
+    from: p.week_start,
+    to: cap(p.week_end),
+    label: `${p.code} · ${mmdd(p.week_start)}–${mmdd(cap(p.week_end))}`,
+  }));
+  const fys = (fysRes.results ?? []).map((f) => ({
+    code: `FY${f.fy}`,
+    from: f.week_start,
+    to: cap(f.week_end),
+    label: `FY${f.fy} (${f.week_start.slice(0, 4)}–${cap(f.week_end).slice(0, 4)})`,
+  }));
+
+  const wkStart = curWk?.week_start ?? weeks[0]?.from ?? latest;
+  const wkEnd = cap(curWk?.week_end ?? weeks[0]?.to ?? latest);
+  const presets = [
+    { key: "yesterday", from: latest, to: latest, label: `Yesterday (${latest})` },
+    { key: "week", from: wkStart, to: wkEnd, label: `This week (${mmdd(wkStart)}–${mmdd(wkEnd)})` },
+    { key: "month", from: latest.slice(0, 7) + "-01", to: latest, label: "This month" },
+  ];
+
+  return json({ latest, presets, fys, periods, weeks });
 }
 
 /** Yesterday / WTD / MTD net sales (cents) from customer_counts + the window bounds. */

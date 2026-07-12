@@ -1658,6 +1658,45 @@ function periodRange(p) {
   var d = new Date(today + "T00:00:00Z"); var y = d.getUTCFullYear(); var mo = d.getUTCMonth() + 1;
   var sy = mo >= 3 ? y : y - 1; return [sy + "-03-01", today];
 }
+// --- Shared period picker (one component, used across analysis screens) --------
+// Presets Yesterday / This week / This month + Financial year / Fiscal period /
+// Fiscal week option groups + Custom range. "Today" is never offered and every
+// range is capped server-side at the latest data date (see /api/periods). Each
+// option value encodes "from|to|label"; onChange(from,to,label) fires on select.
+var _periodsData=null;
+function loadPeriods(){return _periodsData?Promise.resolve(_periodsData):api("/api/periods").then(function(d){_periodsData=d;return d})}
+function periodPickerHTML(id){
+  return '<div class="toolbar"><label class="small muted">Period</label>'
+    +'<select class="sel" id="'+id+'"><option>Loading\\u2026</option></select>'
+    +'<span id="'+id+'_c" style="display:none"> <input type="date" class="inp" id="'+id+'_f"> <span class="muted">\\u2192</span> <input type="date" class="inp" id="'+id+'_t"> <button class="btn" id="'+id+'_b">Apply</button></span>'
+    +'<span class="muted small" id="'+id+'_r" style="margin-left:8px"></span></div>';
+}
+function initPeriodPicker(id,onChange,def){
+  loadPeriods().then(function(d){
+    var sel=$(id);if(!sel)return;
+    function opt(v,l){return '<option value="'+esc(v)+'">'+esc(l)+'</option>'}
+    var h='';
+    d.presets.forEach(function(p){h+=opt(p.from+'|'+p.to+'|'+p.label,p.label)});
+    function grp(lab,arr){if(!arr||!arr.length)return'';var s='<optgroup label="'+lab+'">';arr.forEach(function(x){s+=opt(x.from+'|'+x.to+'|'+x.label,x.label)});return s+'</optgroup>'}
+    h+=grp("Financial year",d.fys)+grp("Fiscal period",d.periods)+grp("Fiscal week",d.weeks);
+    h+='<option value="custom">Custom range\\u2026</option>';
+    sel.innerHTML=h;
+    var fI=$(id+'_f'),tI=$(id+'_t');if(fI)fI.max=d.latest;if(tI)tI.max=d.latest;
+    function fire(from,to,label){var r=$(id+'_r');if(r)r.innerHTML=esc(from)+' <span class="muted">\\u2192</span> '+esc(to);onChange(from,to,label||(from+' \\u2192 '+to))}
+    sel.onchange=function(){
+      if(this.value==='custom'){$(id+'_c').style.display='';return}
+      $(id+'_c').style.display='none';
+      var p=this.value.split('|');fire(p[0],p[1],p.slice(2).join('|'));
+    };
+    var btn=$(id+'_b');if(btn)btn.onclick=function(){var f=fI.value,t=tI.value;if(f&&t)fire(f,t)};
+    // default selection: a preset key ('yesterday'|'week'|'month') or 'fy'
+    var want=def||'month',dv=null;
+    if(want==='fy'&&d.fys.length)dv=d.fys[0].from+'|'+d.fys[0].to+'|'+d.fys[0].label;
+    else{var pp=d.presets.find(function(p){return p.key===want});if(pp)dv=pp.from+'|'+pp.to+'|'+pp.label;}
+    if(dv)sel.value=dv;
+    sel.onchange();
+  });
+}
 // Row colour from margin variance (actual - guideline, + is good).
 function marginRowColour(v) {
   if (v == null) return "";
@@ -1667,14 +1706,11 @@ var PROD_WARN = "Daily margin distorted by production timing. Weekly FIM is more
 var FRESHB_WARN = "Fresh B department (weekly stocktake). Daily FIM margin is suppressed \\u2014 only weekly post-stocktake FIM is used for margin.";
 
 PAGES.departments = function () {
-  setHTML('<div class="toolbar"><label class="small muted">Period</label>'
-    + '<select class="sel" id="dperiod"><option value="all" selected>All data</option><option value="today">Today</option><option value="week">This week</option>'
-    + '<option value="month">This month</option><option value="fy">Financial year</option></select>'
-    + '<span class="muted small" id="drange"></span></div><div id="dbody"><div class="loading">Loading\\u2026</div></div>');
-  function load(p) {
-    var rng = periodRange(p);
-    $("drange").innerHTML = esc(rng[0]) + ' <span class="muted">\\u2192</span> ' + esc(rng[1]);
-    Promise.all([api("/api/departments-po"), api("/api/fim/period?from=" + rng[0] + "&to=" + rng[1])]).then(function (res) {
+  setHTML(periodPickerHTML("dperiod") + '<div id="dbody"><div class="loading">Loading\\u2026</div></div>');
+  function load(from, to) {
+    $("dbody").innerHTML = '<div class="loading">Loading\\u2026</div>';
+    // BUG FIX: pass the period to the PO endpoint too (previously PO showed full history).
+    Promise.all([api("/api/departments-po?from=" + from + "&to=" + to), api("/api/fim/period?from=" + from + "&to=" + to)]).then(function (res) {
       var po = res[0].departments || [], fim = res[1].departments || [];
       var fbDate = res[1].freshBMarginDate;
       var pmap = {}; po.forEach(function (x) { pmap[x.dept] = x; });
@@ -1717,8 +1753,7 @@ PAGES.departments = function () {
         + (fbDate ? ' &nbsp; \\u00b7 \\u2298 Fresh B daily margin suppressed \\u2014 weekly post-stocktake FIM only (through ' + esc(fbDate) + ')' : '') + '.</div></div>';
     }).catch(function (e) { $("dbody").innerHTML = '<div class="err">' + esc(e.message) + "</div>"; });
   }
-  $("dperiod").onchange = function () { load(this.value); };
-  load("all");
+  initPeriodPicker("dperiod", load, "month");
 };
 
 // ---- Merchandise Hierarchy (Division → BU → CP drill-down) ----

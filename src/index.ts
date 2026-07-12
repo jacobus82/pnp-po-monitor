@@ -49,6 +49,7 @@ import {
   handleFiscalWeek,
   handleGrPeriod,
   handleMetaRange,
+  handlePeriods,
   handleOpenOrders,
   handleReturns,
   handleGrReconciliation,
@@ -2263,6 +2264,7 @@ export default {
       if (path === "/api/fiscal/week" && m === "GET") return await handleFiscalWeek(req, env);
       if (path === "/api/gr/period" && m === "GET") return await handleGrPeriod(req, env);
       if (path === "/api/meta/range" && m === "GET") return await handleMetaRange(env);
+      if (path === "/api/periods" && m === "GET") return await handlePeriods(env);
 
       // merchandise hierarchy
       if (path === "/api/hierarchy" && m === "GET") return await handleHierarchy(env);
@@ -2282,7 +2284,7 @@ export default {
       if (path === "/api/categories" && m === "GET") return await handleCategories(env);
       const categoryDetail = path.match(/^\/api\/categories\/([^/]+)$/);
       if (categoryDetail && m === "GET") return await handleCategoryDetail(env, decodeURIComponent(categoryDetail[1]!));
-      if (path === "/api/departments-po" && m === "GET") return await handleDepartmentsPo(env);
+      if (path === "/api/departments-po" && m === "GET") return await handleDepartmentsPo(req, env);
       if (path === "/api/open-orders" && m === "GET") return await handleOpenOrders(req, env);
       if (path === "/api/returns" && m === "GET") return await handleReturns(req, env);
       if (path === "/api/gr/reconciliation" && m === "GET") return await handleGrReconciliation(env);
