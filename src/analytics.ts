@@ -2018,10 +2018,15 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
          ORDER BY fiscal_week_end DESC LIMIT 13`,
     ).all<{ ws: string; we: string; shrink: number; waste: number; sales: number }>(),
     env.DB.prepare(
-      `SELECT id, type, severity, message, detected_at FROM anomalies
+      // BUG FIX: scope anomalies to the selected period (via each anomaly's FIM
+      // reportDate) — previously the list showed all open waste/shrink anomalies
+      // regardless of the picked dates.
+      `SELECT id, type, severity, message, detected_at, json_extract(detail_json,'$.reportDate') report_date
+         FROM anomalies
          WHERE resolved = 0 AND type IN ('FIM_HIGH_WASTE','FIM_HIGH_SHRINK')
-         ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
-    ).all(),
+           AND json_extract(detail_json,'$.reportDate') BETWEEN ? AND ?
+         ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 50`,
+    ).bind(from, to).all(),
   ]);
   const rows = rowsRes.results ?? [];
 

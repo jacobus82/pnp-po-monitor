@@ -2189,16 +2189,12 @@ var IMA_GROUP={};IMA.forEach(function(g){IMA_GROUP[g.id]=g.label});
 // Period selector shared by the dashboard + group screens. State persists in
 // IMA_PERIOD; all values are placeholders ("--") until the FIM API is wired up.
 var IMA_PERIOD={type:"month",period:""};
-function imaPeriodBar(){
-  var types=[["day","Daily"],["week","Weekly"],["month","Monthly"],["fy","Financial Year"]];
-  var opts=types.map(function(t){return '<option value="'+t[0]+'"'+(IMA_PERIOD.type===t[0]?" selected":"")+'>'+t[1]+'</option>'}).join("");
-  return '<div class="toolbar"><label class="small muted">Period type</label>'
-    +'<select class="sel" id="imaPType" onchange="imaSetPeriod()">'+opts+'</select>'
-    +'<label class="small muted">Period</label>'
-    +'<input class="inp" id="imaPeriodVal" type="month" value="'+esc(IMA_PERIOD.period)+'" onchange="imaSetPeriod()">'
-    +'<span class="muted small">Values populate from the FIM upload (coming soon).</span></div>';
-}
-function imaSetPeriod(){var t=$("imaPType");if(t)IMA_PERIOD.type=t.value;var p=$("imaPeriodVal");if(p)IMA_PERIOD.period=p.value;go()}
+// BUG FIX: the old IMA bar only sent dates for "Monthly" (day/week/fy did
+// nothing, and no specific date was pickable). Use the shared period picker so
+// any date/week/period/FY/custom range is selectable and actually drives the data.
+var _imaFT={from:"",to:""};
+function imaPeriodBar(){return periodPickerHTML("imaPer")}
+function imaWire(reload){initPeriodPicker("imaPer",function(from,to){_imaFT={from:from,to:to};reload()},"month")}
 
 // Map IMA item id -> [fim_daily column, kind]. ONLY items whose metric is actually
 // stored in fim_daily are wired to real data; everything else shows "--".
@@ -2229,8 +2225,7 @@ var IMA_DBCOL={
 };
 // Fetch store-total FIM values for the selected period (defaults to latest month).
 function imaFetch(){
-  var p="";
-  if(IMA_PERIOD.type==="month"&&IMA_PERIOD.period)p="?from="+IMA_PERIOD.period+"-01&to="+new Date(Date.UTC(+IMA_PERIOD.period.slice(0,4),+IMA_PERIOD.period.slice(5,7),0)).toISOString().slice(0,10);
+  var p=(_imaFT.from&&_imaFT.to)?("?from="+_imaFT.from+"&to="+_imaFT.to):"";
   return api("/api/fim/ima"+p);
 }
 function imaVal(it,vals){var m=IMA_DBCOL[it.id];if(!m)return "--";var v=vals[m[0]];if(v==null)return "--";return m[1]==="pct"?pct(v):Rr0(v)}
@@ -2239,6 +2234,7 @@ function imaVal(it,vals){var m=IMA_DBCOL[it.id];if(!m)return "--";var v=vals[m[0
 // real money metric in the group, else "--".
 PAGES.ima=function(){
   setHTML(imaPeriodBar()+'<div id="imacards" class="cards g3"><div class="loading">Loading\\u2026</div></div>');
+  function reload(){ var ec=$("imacards"); if(ec)ec.innerHTML='<div class="loading">Loading\\u2026</div>';
   imaFetch().then(function(d){
     var vals=d.values||{};
     $("imacards").innerHTML=IMA.map(function(g){
@@ -2254,7 +2250,8 @@ PAGES.ima=function(){
         +'<div class="kpi"><div class="v">'+head+'</div><div class="l">'+g.items.length+' FIM metrics</div></div>'
         +extra+'<a class="link">View detail \\u2192</a></div>';
     }).join("");
-  }).catch(function(e){var el=$("imacards");if(el)el.innerHTML='<div class="err">'+esc(e.message)+'</div>'});
+  }).catch(function(e){var el=$("imacards");if(el)el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}); }
+  imaWire(reload);
 };
 
 // Per-group detail: lists that group's metrics, real values where the column
@@ -2265,13 +2262,15 @@ IMA.forEach(function(g){
       +'<div class="card"><h2 style="text-transform:none;color:var(--ink);font-size:15px">'+g.icon+' '+esc(g.label)+'</h2>'
       +'<div id="imabody"><div class="loading">Loading\\u2026</div></div>'
       +'<div style="margin-top:10px"><a class="link" href="#ima">\\u2190 Back to IMA dashboard</a></div></div>');
+    function reload(){ var lb=$("imabody"); if(lb)lb.innerHTML='<div class="loading">Loading\\u2026</div>';
     imaFetch().then(function(d){
       var vals=d.values||{};
       var rows=g.items.map(function(it){
         return '<tr><td>'+esc(it.label)+'</td><td class="num muted">'+it.col+'</td><td class="num">'+imaVal(it,vals)+'</td></tr>';
       }).join("");
       var el=$("imabody");if(el)el.innerHTML='<div class="muted small" style="margin-bottom:6px">Period '+esc(d.from||"latest")+' \\u2192 '+esc(d.to||"")+'</div><div class="tablewrap"><table><thead><tr><th>Metric</th><th class="num">FIM col</th><th class="num">Value</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
-    }).catch(function(e){var el=$("imabody");if(el)el.innerHTML='<div class="err">'+esc(e.message)+'</div>'});
+    }).catch(function(e){var el=$("imabody");if(el)el.innerHTML='<div class="err">'+esc(e.message)+'</div>'}); }
+    imaWire(reload);
   };
 });
 
