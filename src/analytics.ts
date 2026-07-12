@@ -2738,8 +2738,17 @@ export async function handleTrading(req: Request, env: Env): Promise<Response> {
   const from = q.get("from") ?? today;
   const to = q.get("to") ?? today;
   const days = Math.max(1, Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1);
-  const priorTo = isoDayMinus1(from);
-  const priorFrom = new Date(Date.parse(priorTo) - (days - 1) * 86_400_000).toISOString().slice(0, 10);
+  // Compare vs the SAME period of the PREVIOUS YEAR (TY vs LY) — e.g. June 2026 vs
+  // June 2025 — not the immediately-preceding period. Shift the calendar dates back
+  // one year, clamping Feb-29 → Feb-28.
+  const shiftYear = (iso: string, n: number): string => {
+    const [y, m, d] = iso.split("-").map(Number);
+    const dt = new Date(Date.UTC((y ?? 0) + n, (m ?? 1) - 1, d ?? 1));
+    if (dt.getUTCMonth() !== (m ?? 1) - 1) dt.setUTCDate(0); // rolled over → last day of target month
+    return dt.toISOString().slice(0, 10);
+  };
+  const priorFrom = shiftYear(from, -1);
+  const priorTo = shiftYear(to, -1);
 
   const [cur, prior, label] = await Promise.all([
     tradingSummary(env, from, to),

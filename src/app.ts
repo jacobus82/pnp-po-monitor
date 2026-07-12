@@ -1132,8 +1132,8 @@ function trLoad(){
   api("/api/trading?from="+r[0]+"&to="+r[1]).then(function(d){
     var lab=$("trLabel");if(lab)lab.textContent=(d.period&&d.period.label)||"";
     var s=d.summary||{},ch=s.change||{};
-    function chg(v,goodWhenDown){if(v==null)return '<span class="muted">\\u2014</span>';var good=goodWhenDown?(v<=0):(v>=0);return '<span class="'+(good?"pos":"neg")+'">'+(v>=0?"\\u25B2 +":"\\u25BC ")+v+'% vs prior</span>'}
-    function pp(v){if(v==null)return '<span class="muted">\\u2014</span>';return '<span class="'+(v>=0?"pos":"neg")+'">'+(v>=0?"\\u25B2 +":"\\u25BC ")+v+'pp vs prior</span>'}
+    function chg(v,goodWhenDown){if(v==null)return '<span class="muted">\\u2014</span>';var good=goodWhenDown?(v<=0):(v>=0);return '<span class="'+(good?"pos":"neg")+'">'+(v>=0?"\\u25B2 +":"\\u25BC ")+v+'% vs LY</span>'}
+    function pp(v){if(v==null)return '<span class="muted">\\u2014</span>';return '<span class="'+(v>=0?"pos":"neg")+'">'+(v>=0?"\\u25B2 +":"\\u25BC ")+v+'pp vs LY</span>'}
     function card(lab,val,sub){return '<div class="card kpi"><div class="v">'+val+'</div><div class="l">'+esc(lab)+'</div><div class="sub">'+sub+'</div></div>'}
     var tpo=d.po||{};
     var poCard='<div class="card kpi"><div class="v">'+Rr0(tpo.netZar)+' <span class="small muted" style="font-weight:400">net</span></div>'
