@@ -1904,21 +1904,99 @@ function round2(n: number): number {
   return Math.round(n * 100) / 100;
 }
 
-/** GET /api/statements — header list for the statements screen, newest first,
- *  with line count and chain status per statement. */
+interface StatementRow {
+  statement_no: string;
+  account: string;
+  statement_date: string | null;
+  period_start: string;
+  cut_off: string;
+  due_date: string;
+  total_due: number;
+  payment: number;
+  opening_balance: number | null;
+  closing_balance: number | null;
+  source: string;
+  line_count: number;
+  debits: number;
+  credits: number;
+  // derived below:
+  net: number;
+  balance_source: "PRINTED" | "DERIVED" | "UNKNOWN";
+}
+
+function isoAddDays(iso: string, days: number): string {
+  const d = new Date(iso + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + days);
+  return d.toISOString().slice(0, 10);
+}
+
+/**
+ * GET /api/statements — weekly statement list with a DERIVED balance chain.
+ *
+ * Native statement CSVs carry no printed opening/closing balances, so only the
+ * one PDF-anchored week (202717) has them. We reconstruct every other week's
+ * balances from that anchor by walking the weekly chain: adjacent statements tie
+ * closing(prev) == opening(next), and each week's net movement is
+ *   net = total_due + payment   (debits + credits + payments == closing - opening)
+ * so opening = closing - net (and closing = opening + net). Balances propagate
+ * bidirectionally across CONTIGUOUS weeks (period_start(n) == cut_off(n-1)+1);
+ * a missing week breaks the chain, leaving earlier weeks UNKNOWN. Printed values
+ * are never overwritten — they stay the source of truth and seed the derivation.
+ */
 async function handleListStatements(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
+  const res = await env.DB.prepare(
     `SELECT s.statement_no, s.account, s.statement_date, s.period_start, s.cut_off,
-            s.due_date, s.total_due, s.payment, s.opening_balance, s.closing_balance,
-            s.source, s.loaded_at,
-            (SELECT COUNT(*) FROM statement_lines l WHERE l.statement_no = s.statement_no) AS line_count,
-            c.chain_status, c.chain_gap
+            s.due_date, s.total_due, s.payment, s.opening_balance, s.closing_balance, s.source,
+            COUNT(l.id) AS line_count,
+            ROUND(COALESCE(SUM(CASE WHEN l.amount > 0 THEN l.amount END), 0), 2) AS debits,
+            ROUND(COALESCE(SUM(CASE WHEN l.amount < 0 AND l.doc_number NOT LIKE '1400%' THEN l.amount END), 0), 2) AS credits
        FROM statements s
-       LEFT JOIN v_statement_chain c ON c.statement_no = s.statement_no
-      ORDER BY s.cut_off DESC, s.statement_no DESC
-      LIMIT 200`,
-  ).all();
-  return json({ statements: rows.results });
+       LEFT JOIN statement_lines l ON l.statement_no = s.statement_no
+      GROUP BY s.statement_no
+      ORDER BY s.cut_off ASC, s.statement_no ASC`,
+  ).all<StatementRow>();
+
+  const list = (res.results ?? []) as StatementRow[];
+  for (const r of list) {
+    r.net = round2(r.total_due + r.payment);
+    // Seed from printed balances; fill the partner side from net if only one printed.
+    if (r.opening_balance != null || r.closing_balance != null) {
+      r.balance_source = "PRINTED";
+      if (r.opening_balance != null && r.closing_balance == null) r.closing_balance = round2(r.opening_balance + r.net);
+      if (r.closing_balance != null && r.opening_balance == null) r.opening_balance = round2(r.closing_balance - r.net);
+    } else {
+      r.balance_source = "UNKNOWN";
+    }
+  }
+
+  const contig = (prev: StatementRow, cur: StatementRow) => cur.period_start === isoAddDays(prev.cut_off, 1);
+  // Propagate from printed anchors both directions until the contiguous runs fill.
+  for (let guard = 0; guard <= list.length; guard++) {
+    let changed = false;
+    for (let i = 1; i < list.length; i++) {
+      const prev = list[i - 1]!, cur = list[i]!;
+      if (contig(prev, cur) && prev.closing_balance != null && cur.opening_balance == null) {
+        cur.opening_balance = prev.closing_balance;
+        cur.closing_balance = round2(cur.opening_balance + cur.net);
+        cur.balance_source = "DERIVED";
+        changed = true;
+      }
+    }
+    for (let i = list.length - 2; i >= 0; i--) {
+      const cur = list[i]!, next = list[i + 1]!;
+      if (contig(cur, next) && next.opening_balance != null && cur.closing_balance == null) {
+        cur.closing_balance = next.opening_balance;
+        cur.opening_balance = round2(cur.closing_balance - cur.net);
+        cur.balance_source = "DERIVED";
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  // Newest first for display.
+  list.reverse();
+  return json({ statements: list });
 }
 
 // --- router --------------------------------------------------------------

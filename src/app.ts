@@ -1956,7 +1956,7 @@ PAGES.cash=function(){loading();api("/api/creditors").then(function(d){
   var chart='<div class="card" style="margin-top:14px"><h2>Closing balance trend</h2>'+lineChart(trend)+'</div>';
   var riskCard='<div class="card" style="margin-top:14px"><h2>Upcoming payment risk \\u2014 next 8 weeks</h2><div id="cashRisk"><div class="muted small">Loading\\u2026</div></div></div>';
   var tbl='<div class="card" style="margin-top:14px"><h2>Statements</h2>'+makeTable([{key:"week_start",label:"Week start"},{key:"week_end",label:"Week end"},{key:"opening_cents",label:"Opening",num:true,fmt:R},{key:"purchases_cents",label:"Purchases",num:true,fmt:R},{key:"credits_cents",label:"Credits",num:true,fmt:R},{key:"closing_cents",label:"Closing",num:true,fmt:R},{key:"due_date",label:"Due"}],st,{rowMenu:false,search:false})+'</div>';
-  var detailCard='<div class="card" style="margin-top:14px"><h2>Detailed statements (line-level)</h2><div id="stmtDetail"><div class="muted small">Loading\\u2026</div></div></div>';
+  var detailCard='<div class="card" style="margin-top:14px"><h2>Statements \\u2014 weekly balance chain</h2><div id="stmtDetail"><div class="muted small">Loading\\u2026</div></div></div>';
   setHTML(form+uploadCard+riskCard+chart+tbl+detailCard);
   var fi=$("stmt-file");if(fi)fi.addEventListener("change",onStmtFile);
   loadStatementDetail();
@@ -2019,20 +2019,23 @@ function onStmtFile(e){
 }
 function loadStatementDetail(){
   var el=$("stmtDetail");if(!el)return;
+  // Balance cell: printed anchor bold, chain-derived grey, unreachable em-dash.
+  function bcell(v,src){if(v==null)return '<span class="muted">\\u2014</span>';var s=Rr(v);return src==="PRINTED"?'<b title="printed on statement">'+s+'</b>':'<span class="muted" title="derived from balance chain">'+s+'</span>'}
   api("/api/statements").then(function(d){
     var rows=d.statements||[];
-    if(!rows.length){el.innerHTML='<div class="muted small">No detailed statements uploaded yet. Use the upload control above.</div>';return}
+    if(!rows.length){el.innerHTML='<div class="muted small">No statements uploaded yet. Use the upload control above.</div>';return}
     el.innerHTML=makeTable([
       {key:"statement_no",label:"Statement"},
       {key:"source",label:"Source",html:function(r){return '<span class="badge '+(r.source==="PDF"?"badge-pdf":"badge-native")+'">'+esc(r.source)+'</span>'}},
       {key:"cut_off",label:"Cut-off"},
       {key:"due_date",label:"Due"},
-      {key:"line_count",label:"Lines",num:true},
+      {key:"opening_balance",label:"Opening",num:true,html:function(r){return bcell(r.opening_balance,r.balance_source)}},
+      {key:"debits",label:"Debits",num:true,fmt:function(v){return Rr(v)}},
+      {key:"credits",label:"Credits",num:true,fmt:function(v){return Rr(v)}},
       {key:"payment",label:"Payments",num:true,fmt:function(v){return Rr(v)}},
-      {key:"total_due",label:"Total due",num:true,fmt:function(v){return Rr(v)}},
-      {key:"closing_balance",label:"Closing",num:true,fmt:function(v){return v==null?"\\u2014":Rr(v)}},
-      {key:"chain_status",label:"Chain",html:function(r){var c=r.chain_status;return c==="BREAK"?'<span class="neg">BREAK</span>':c==="OK"?'<span class="pos">OK</span>':'<span class="muted">'+esc(c||"\\u2014")+'</span>'}}
-    ],rows,{rowMenu:false,search:false});
+      {key:"closing_balance",label:"Closing",num:true,html:function(r){return bcell(r.closing_balance,r.balance_source)}}
+    ],rows,{rowMenu:false,search:false})
+      +'<div class="small muted" style="margin-top:6px">Opening/Closing in <b>bold</b> are printed on the statement; grey values are <b>derived</b> from the weekly balance chain (closing of one week = opening of the next). A missing week breaks the chain, so earlier weeks show \\u2014. Debits = invoices/purchases, Credits = credit notes (payments shown separately); Debits + Credits = total due.</div>';
   }).catch(function(){el.innerHTML='<div class="muted small">Could not load statements.</div>'});
 }
 
