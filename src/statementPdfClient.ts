@@ -59,13 +59,17 @@ export function parseStatementPdf(pageLines) {
   for (const page of pageLines) {
     for (const raw of page) {
       let m;
-      if ((m = raw.match(/Cut-off date\s+(\d{2}\.\d{2}\.\d{2})\s+Statement\s+(\d+)/)))
+      // Header dates: most statements print a 2-digit year (20.07.25), but some
+      // older ones use a 4-digit year in the header block (Cut-off / Due date /
+      // Bal.carried) while the closing line and every transaction line stay
+      // 2-digit. Accept both (\d{2,4} year); ddmmyy() normalises either form.
+      if ((m = raw.match(/Cut-off date\s+(\d{2}\.\d{2}\.\d{2,4})\s+Statement\s+(\d+)/)))
         { meta.cutoff = m[1]; meta.stmt = m[2]; }
-      if ((m = raw.match(/Due date\s+(\d{2}\.\d{2}\.\d{2})/)) && !meta.due)
+      if ((m = raw.match(/Due date\s+(\d{2}\.\d{2}\.\d{2,4})/)) && !meta.due)
         meta.due = m[1];
-      if ((m = raw.match(/Bal\.carried fwd\.\s+\d{2}\.\d{2}\.\d{2}\s*:\s+([\d,]+\.\d{2}-?)/)))
+      if ((m = raw.match(/Bal\.carried fwd\.\s+\d{2}\.\d{2}\.\d{2,4}\s*:\s+([\d,]+\.\d{2}-?)/)))
         meta.opening = dec(m[1]);
-      if ((m = raw.match(/Closing balance\s+\d{2}\.\d{2}\.\d{2}\s*:\s+([\d,]+\.\d{2}-?)/)))
+      if ((m = raw.match(/Closing balance\s+\d{2}\.\d{2}\.\d{2,4}\s*:\s+([\d,]+\.\d{2}-?)/)))
         meta.closing = dec(m[1]);
       if ((m = raw.match(/Total amount due for statement\s+([\d,]+\.\d{2}-?)/)))
         meta.totalDue = dec(m[1]);
@@ -187,6 +191,6 @@ function classify(vendorText, reference) {
 
 function dec(tok) { const neg = tok.endsWith('-'); const n = Number(tok.replace(/-$/, '').replace(/,/g, '')); return neg ? -n : n; }
 function r2(n) { return Math.round(n * 100) / 100; }
-function ddmmyy(s) { const parts = s.split('.'); return '20' + parts[2] + '-' + parts[1] + '-' + parts[0]; }
+function ddmmyy(s) { const parts = s.split('.'); const y = parts[2].length === 4 ? parts[2] : '20' + parts[2]; return y + '-' + parts[1] + '-' + parts[0]; }
 function addDays(iso, days) { const d = new Date(iso + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + days); return d.toISOString().slice(0, 10); }
 `;
