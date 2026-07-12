@@ -460,15 +460,6 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
   if (dept) { where.push("substr(p.mdse_cat,1,3) = ?"); binds.push(dept); }
   const scope = where.length ? "WHERE " + where.join(" AND ") : "";
 
-  const sum = await env.DB.prepare(
-    `SELECT COUNT(*) total_po_lines,
-            SUM(CASE WHEN p.is_fully_received = 1 THEN 1 ELSE 0 END) matched_lines,
-            SUM(CASE WHEN p.is_fully_received = 0 THEN 1 ELSE 0 END) unmatched_po_lines,
-            COALESCE(SUM(COALESCE(p.line_value_cents,0)),0)/100.0 total_ordered_value,
-            COALESCE(SUM(COALESCE(p.received_value,0)),0) total_received_value
-     FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${scope}`,
-  ).bind(...binds).first<Record<string, number>>();
-
   // GR-side scope (gr_date range only; gr_lines has no vendor and a different dept code).
   // "Unmatched" = the GR line's (po_number, article_code) has no PO line. This is
   // expressed as a set-based anti-join against a materialized set of matched keys,
@@ -487,9 +478,64 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
   if (to) { grWhere.push("g.gr_date <= ?"); grBinds.push(to); }
   const grScope = "WHERE " + grWhere.join(" AND ");
 
-  const grCountRow = await env.DB.prepare(
+  // PO-based line filter (all => still-outstanding lines). Built up-front so the
+  // detail query can be fired alongside the others.
+  const wantPoLines = status !== "unmatched-gr";
+  const lw = [...where];
+  lw.push(status === "matched" ? "p.is_fully_received = 1" : "p.is_fully_received = 0");
+  const lineScope = "WHERE " + lw.join(" AND ");
+
+  // Run the four independent, read-only queries CONCURRENTLY instead of awaiting
+  // them one at a time. No data flows between them, so Promise.all is safe and
+  // results are identical; overlapping the two heavy GR-side round-trips (~1.3s
+  // each) with the PO summary + PO detail cuts the endpoint from ~6s toward ~3s.
+  const sumP = env.DB.prepare(
+    `SELECT COUNT(*) total_po_lines,
+            SUM(CASE WHEN p.is_fully_received = 1 THEN 1 ELSE 0 END) matched_lines,
+            SUM(CASE WHEN p.is_fully_received = 0 THEN 1 ELSE 0 END) unmatched_po_lines,
+            COALESCE(SUM(COALESCE(p.line_value_cents,0)),0)/100.0 total_ordered_value,
+            COALESCE(SUM(COALESCE(p.received_value,0)),0) total_received_value
+     FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${scope}`,
+  ).bind(...binds).first<Record<string, number>>();
+
+  const grCountP = env.DB.prepare(
     `${MATCHED_CTE} SELECT COUNT(*) n FROM (SELECT 1 ${grFrom} ${grScope} GROUP BY g.po_number, g.article_code)`,
   ).bind(...grBinds).first<{ n: number }>();
+
+  const poLinesP = wantPoLines
+    ? env.DB.prepare(
+        `SELECT p.po_number, a.article_code, a.description article_desc,
+                v.name vendor_name, v.vendor_code, substr(p.mdse_cat,1,3) sap_dept_code,
+                p.order_date, p.order_qty, COALESCE(p.line_value_cents,0)/100.0 order_value,
+                COALESCE(p.received_qty,0) received_qty, COALESCE(p.received_value,0) received_value,
+                p.last_gr_date,
+                CAST(julianday('now') - julianday(COALESCE(p.last_gr_date, p.order_date)) AS INTEGER) days_outstanding
+         FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
+         ${lineScope} ORDER BY days_outstanding DESC LIMIT ?`,
+      ).bind(...binds, limit).all<Record<string, number | string | null>>()
+    : null;
+
+  const grRowsP = env.DB.prepare(
+    `${MATCHED_CTE}
+     SELECT g.po_number, g.article_code, g.article_desc, g.dept_code sap_dept_code,
+            SUM(COALESCE(g.qty,0)) received_qty, SUM(COALESCE(g.cost_zar,0)) received_value,
+            MAX(g.gr_date) last_gr_date, COUNT(*) gr_count,
+            CAST(julianday('now') - julianday(MAX(g.gr_date)) AS INTEGER) days_outstanding
+     ${grFrom} ${grScope}
+     GROUP BY g.po_number, g.article_code
+     ORDER BY received_value DESC LIMIT ?`,
+  ).bind(...grBinds, limit).all<Record<string, number | string | null>>();
+
+  const [sum, grCountRow, poLinesRes, grRowsRes] = await Promise.all([sumP, grCountP, poLinesP, grRowsP]);
+
+  const grResults = grRowsRes.results ?? [];
+  // Fold: the GR detail query returns EVERY unmatched group unless it was capped
+  // at the limit, in which case its row count IS the true count — so derive the
+  // count from the result when it fits, and only trust the separate COUNT(*)
+  // query when the rows were truncated. (For this store the unmatched-GR set far
+  // exceeds the limit, so the fold's short-circuit is dormant and the count comes
+  // from grCountP, which ran in parallel — see the note in the endpoint review.)
+  const unmatchedGrCount = grResults.length < limit ? grResults.length : (grCountRow?.n ?? 0);
 
   const totalOrdered = sum?.total_ordered_value ?? 0;
   const totalReceived = sum?.total_received_value ?? 0;
@@ -497,7 +543,7 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
     total_po_lines: sum?.total_po_lines ?? 0,
     matched_lines: sum?.matched_lines ?? 0,
     unmatched_po_lines: sum?.unmatched_po_lines ?? 0,
-    unmatched_gr_lines: grCountRow?.n ?? 0,
+    unmatched_gr_lines: unmatchedGrCount,
     total_ordered_value: Math.round(totalOrdered * 100) / 100,
     total_received_value: Math.round(totalReceived * 100) / 100,
     receipt_rate_pct: totalOrdered > 0 ? Math.round((totalReceived / totalOrdered) * 1000) / 10 : null,
@@ -505,24 +551,8 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
 
   // PO-based lines per status filter (all => still-outstanding lines).
   let lines: unknown[] = [];
-  if (status !== "unmatched-gr") {
-    const lw = [...where];
-    if (status === "matched") lw.push("p.is_fully_received = 1");
-    else if (status === "unmatched-po") lw.push("p.is_fully_received = 0");
-    else lw.push("p.is_fully_received = 0");
-    const lineScope = lw.length ? "WHERE " + lw.join(" AND ") : "";
-    const rows = await env.DB.prepare(
-      `SELECT p.po_number, a.article_code, a.description article_desc,
-              v.name vendor_name, v.vendor_code, substr(p.mdse_cat,1,3) sap_dept_code,
-              p.order_date, p.order_qty, COALESCE(p.line_value_cents,0)/100.0 order_value,
-              COALESCE(p.received_qty,0) received_qty, COALESCE(p.received_value,0) received_value,
-              p.last_gr_date,
-              CAST(julianday('now') - julianday(COALESCE(p.last_gr_date, p.order_date)) AS INTEGER) days_outstanding
-       FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
-       ${lineScope} ORDER BY days_outstanding DESC LIMIT ?`,
-    ).bind(...binds, limit).all<Record<string, number | string | null>>();
-
-    lines = (rows.results ?? []).map((r) => {
+  if (wantPoLines) {
+    lines = (poLinesRes?.results ?? []).map((r) => {
       const orderQty = r.order_qty as number | null;
       const receivedQty = (r.received_qty as number) ?? 0;
       const orderValue = (r.order_value as number) ?? 0;
@@ -545,18 +575,8 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
   }
 
   // GR received with no matching PO (always returned for the tab's second table).
-  const grRows = await env.DB.prepare(
-    `${MATCHED_CTE}
-     SELECT g.po_number, g.article_code, g.article_desc, g.dept_code sap_dept_code,
-            SUM(COALESCE(g.qty,0)) received_qty, SUM(COALESCE(g.cost_zar,0)) received_value,
-            MAX(g.gr_date) last_gr_date, COUNT(*) gr_count,
-            CAST(julianday('now') - julianday(MAX(g.gr_date)) AS INTEGER) days_outstanding
-     ${grFrom} ${grScope}
-     GROUP BY g.po_number, g.article_code
-     ORDER BY received_value DESC LIMIT ?`,
-  ).bind(...grBinds, limit).all<Record<string, number | string | null>>();
-
-  const unmatchedGr = (grRows.results ?? []).map((r) => ({
+  // Rows come from grRowsP, fetched concurrently above.
+  const unmatchedGr = grResults.map((r) => ({
     po_number: r.po_number, article_code: r.article_code, article_desc: r.article_desc,
     vendor_name: null, vendor_code: null, sap_dept_code: r.sap_dept_code,
     order_date: null, order_qty: null, order_value: 0,
