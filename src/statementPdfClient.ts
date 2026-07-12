@@ -21,7 +21,15 @@
 
 export const STATEMENT_PDF_JS = String.raw`
 const AMT = /^\d[\d,]*\.\d{2}-?$/;
-const LINE = /^\s*(\d{10})(\*?)\s+(\d{2}\.\d{2}\.\d{2})\s+(.*)$/;
+// Transaction line = 10-digit doc, then the date. Newer statements print a space
+// after the optional "*" marker ("1400009959* 24.06.26"); older ones glue the "*"
+// straight onto the date with no space ("1400007733*19.05.25"), which the old
+// "(\*?)\s+" required-whitespace form silently dropped — losing payment (1400*)
+// and interest (1800*) lines and breaking the balance check. Accept EITHER form:
+// a "*" (optionally followed by space) OR mandatory whitespace. This is additive —
+// it never matches a bare digits-abut-date run with neither a "*" nor a space, and
+// the amount regex is untouched. Groups unchanged: 1=doc, 3=date.
+const LINE = /^\s*(\d{10})(?:(\*)\s*|\s+)(\d{2}\.\d{2}\.\d{2})\s+(.*)$/;
 
 export async function extractPageLines(pdf) {
   const pages = [];
