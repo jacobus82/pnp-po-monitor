@@ -98,37 +98,39 @@ export async function handlePurchasesSummary(req: Request, env: Env): Promise<Re
   const groupBy = q.get("groupBy") ?? "week";
   const { sql: rangeSql, binds } = dateRange(req);
 
-  const totals = await env.DB.prepare(
-    `SELECT SUM(${PURCH}) purchases, SUM(${RET}) returns,
+  // totals + per-day rows are independent po_lines scans with the same binds; the
+  // fiscal-week lookup (only needed for weekly grouping) is independent too. Run
+  // all three concurrently.
+  const wantFweeks = groupBy === "week";
+  const [totals, rows, fweeksRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT SUM(${PURCH}) purchases, SUM(${RET}) returns,
             SUM(COALESCE(p.open_value_cents,0)) open_deliver,
             SUM(COALESCE(p.open_invoice_cents,0)) open_invoice,
             COUNT(*) lines, COUNT(DISTINCT p.po_number) po_count
      FROM po_lines p WHERE p.order_date IS NOT NULL ${rangeSql}`,
-  )
-    .bind(...binds)
-    .first<Record<string, number>>();
-
-  // Group key by day / ISO-ish week / month (computed client-relevant in JS for week).
-  const rows = await env.DB.prepare(
-    `SELECT p.order_date d, SUM(${PURCH}) purchases, SUM(${RET}) returns, COUNT(*) lines
+    )
+      .bind(...binds)
+      .first<Record<string, number>>(),
+    // Group key by day / ISO-ish week / month (computed client-relevant in JS for week).
+    env.DB.prepare(
+      `SELECT p.order_date d, SUM(${PURCH}) purchases, SUM(${RET}) returns, COUNT(*) lines
      FROM po_lines p WHERE p.order_date IS NOT NULL ${rangeSql}
      GROUP BY p.order_date ORDER BY p.order_date`,
-  )
-    .bind(...binds)
-    .all<{ d: string; purchases: number; returns: number; lines: number }>();
-
-  // For weekly grouping, bucket each date by the OFFICIAL fiscal week from the
-  // fiscal_weeks lookup table (calculated calendar as a fallback only).
-  let fweeks: { week_start: string; week_end: string; fiscal_week_code: string }[] = [];
-  if (groupBy === "week") {
-    fweeks = (
-      await env.DB.prepare(`SELECT week_start, week_end, fiscal_week_code FROM fiscal_weeks ORDER BY week_start`).all<{
-        week_start: string;
-        week_end: string;
-        fiscal_week_code: string;
-      }>()
-    ).results ?? [];
-  }
+    )
+      .bind(...binds)
+      .all<{ d: string; purchases: number; returns: number; lines: number }>(),
+    // For weekly grouping, bucket each date by the OFFICIAL fiscal week from the
+    // fiscal_weeks lookup table (calculated calendar as a fallback only).
+    wantFweeks
+      ? env.DB.prepare(`SELECT week_start, week_end, fiscal_week_code FROM fiscal_weeks ORDER BY week_start`).all<{
+          week_start: string;
+          week_end: string;
+          fiscal_week_code: string;
+        }>()
+      : null,
+  ]);
+  const fweeks: { week_start: string; week_end: string; fiscal_week_code: string }[] = fweeksRes?.results ?? [];
   const findWeek = (d: string) => fweeks.find((w) => w.week_start <= d && d <= w.week_end);
 
   const buckets = new Map<string, { key: string; label: string; purchases: number; returns: number; lines: number; sort: string }>();
@@ -202,36 +204,41 @@ export async function handleVendorDetail(env: Env, code: string): Promise<Respon
     .first();
   if (!kpis) return json({ error: "Vendor not found", code }, 404);
 
-  const pos = await env.DB.prepare(
-    `SELECT p.po_number, MIN(p.order_date) order_date, COUNT(*) lines,
+  // kpis is awaited first so a missing vendor 404s WITHOUT firing these four heavy
+  // scans. Once the vendor exists, its POs, articles, returns, and lines are
+  // independent — fetch them concurrently.
+  const [pos, articles, returns, lines] = await Promise.all([
+    env.DB.prepare(
+      `SELECT p.po_number, MIN(p.order_date) order_date, COUNT(*) lines,
             SUM(${PURCH}) value, SUM(COALESCE(p.open_value_cents,0)) open_deliver
      FROM po_lines p JOIN vendors v ON v.id=p.vendor_id WHERE v.vendor_code = ?
      GROUP BY p.po_number ORDER BY order_date DESC LIMIT 200`,
-  )
-    .bind(code)
-    .all();
-  const articles = await env.DB.prepare(
-    `SELECT a.article_code, a.description, SUM(${PURCH}) value, COUNT(*) lines
+    )
+      .bind(code)
+      .all(),
+    env.DB.prepare(
+      `SELECT a.article_code, a.description, SUM(${PURCH}) value, COUNT(*) lines
      FROM po_lines p JOIN vendors v ON v.id=p.vendor_id JOIN articles a ON a.id=p.article_id
      WHERE v.vendor_code = ? GROUP BY a.id ORDER BY value DESC LIMIT 200`,
-  )
-    .bind(code)
-    .all();
-  const returns = await env.DB.prepare(
-    `SELECT p.po_number, p.order_date, a.article_code, a.description, -p.line_value_cents value
+    )
+      .bind(code)
+      .all(),
+    env.DB.prepare(
+      `SELECT p.po_number, p.order_date, a.article_code, a.description, -p.line_value_cents value
      FROM po_lines p JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
      WHERE v.vendor_code = ? AND p.sloc='S002' ORDER BY p.order_date DESC LIMIT 200`,
-  )
-    .bind(code)
-    .all();
-  const lines = await env.DB.prepare(
-    `SELECT p.po_number, p.order_date, a.article_code, a.description, p.mdse_cat, p.sloc,
+    )
+      .bind(code)
+      .all(),
+    env.DB.prepare(
+      `SELECT p.po_number, p.order_date, a.article_code, a.description, p.mdse_cat, p.sloc,
             p.order_qty, p.net_price_cents, p.line_value_cents, p.open_value_cents
      FROM po_lines p JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
      WHERE v.vendor_code = ? ORDER BY p.line_value_cents DESC LIMIT 500`,
-  )
-    .bind(code)
-    .all();
+    )
+      .bind(code)
+      .all(),
+  ]);
   return json({
     kpis,
     pos: pos.results,
@@ -266,22 +273,25 @@ export async function handleArticleDetail(env: Env, code: string): Promise<Respo
     .bind(code)
     .first();
   if (!kpis) return json({ error: "Article not found", code }, 404);
-  const history = await env.DB.prepare(
-    `SELECT p.order_date, p.net_price_cents, v.vendor_code, v.name vendor
+  // kpis gates the 404 first; the price history and line list are then independent.
+  const [history, lines] = await Promise.all([
+    env.DB.prepare(
+      `SELECT p.order_date, p.net_price_cents, v.vendor_code, v.name vendor
      FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.article_code = ? AND p.order_date IS NOT NULL AND p.net_price_cents IS NOT NULL
      ORDER BY p.order_date`,
-  )
-    .bind(code)
-    .all();
-  const lines = await env.DB.prepare(
-    `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor, p.order_qty,
+    )
+      .bind(code)
+      .all(),
+    env.DB.prepare(
+      `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor, p.order_qty,
             p.net_price_cents, p.line_value_cents, p.sloc
      FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.article_code = ? ORDER BY p.order_date DESC LIMIT 500`,
-  )
-    .bind(code)
-    .all();
+    )
+      .bind(code)
+      .all(),
+  ]);
   return json({ kpis, history: history.results, lines: lines.results });
 }
 
@@ -311,17 +321,20 @@ export async function handleCategoryDetail(env: Env, code: string): Promise<Resp
 
 /** GET /api/departments-po — PO purchases by department vs guideline/budget. */
 export async function handleDepartmentsPo(env: Env): Promise<Response> {
-  const rows = await env.DB.prepare(
-    `SELECT substr(p.mdse_cat,1,3) dept,
+  // Heavy po_lines aggregate + light guideline lookup are independent — overlap them.
+  const [rows, guides] = await Promise.all([
+    env.DB.prepare(
+      `SELECT substr(p.mdse_cat,1,3) dept,
             SUM(${PURCH}) purchases, SUM(${RET}) returns,
             SUM(COALESCE(p.open_value_cents,0)) open_deliver, COUNT(*) lines
      FROM po_lines p WHERE p.mdse_cat IS NOT NULL AND p.mdse_cat != ''
      GROUP BY substr(p.mdse_cat,1,3) ORDER BY purchases DESC`,
-  ).all<{ dept: string; purchases: number; returns: number; open_deliver: number; lines: number }>();
-  const guides = await env.DB.prepare(
-    `SELECT dept_code, dept_name, dept_group, guideline_margin_pct FROM dept_guidelines
+    ).all<{ dept: string; purchases: number; returns: number; open_deliver: number; lines: number }>(),
+    env.DB.prepare(
+      `SELECT dept_code, dept_name, dept_group, guideline_margin_pct FROM dept_guidelines
      WHERE effective_from = (SELECT MAX(effective_from) FROM dept_guidelines g2 WHERE g2.dept_code = dept_guidelines.dept_code)`,
-  ).all<{ dept_code: string; dept_name: string; dept_group: string; guideline_margin_pct: number }>();
+    ).all<{ dept_code: string; dept_name: string; dept_group: string; guideline_margin_pct: number }>(),
+  ]);
   const gmap = new Map((guides.results ?? []).map((g) => [g.dept_code, g]));
   const departments = (rows.results ?? []).map((r) => {
     const g = gmap.get(r.dept);
@@ -593,37 +606,32 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
 export async function handleReturns(req: Request, env: Env): Promise<Response> {
   const groupBy = new URL(req.url).searchParams.get("groupBy") ?? "all";
   // S002 values are negative movements; negate to report positive return magnitudes.
-  const totals = await env.DB.prepare(
+  const totalsSql =
     `SELECT -SUM(COALESCE(line_value_cents,0)) value, COUNT(*) lines, COUNT(DISTINCT po_number) pos
-     FROM po_lines WHERE sloc = 'S002'`,
-  ).first();
+     FROM po_lines WHERE sloc = 'S002'`;
 
-  let rows;
-  if (groupBy === "vendor") {
-    rows = await env.DB.prepare(
-      `SELECT v.vendor_code code, v.name label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
-       FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.sloc='S002'
-       GROUP BY v.id ORDER BY value DESC`,
-    ).all();
-  } else if (groupBy === "article") {
-    rows = await env.DB.prepare(
-      `SELECT a.article_code code, a.description label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
-       FROM po_lines p LEFT JOIN articles a ON a.id=p.article_id WHERE p.sloc='S002'
-       GROUP BY a.id ORDER BY value DESC`,
-    ).all();
-  } else if (groupBy === "category") {
-    rows = await env.DB.prepare(
-      `SELECT p.mdse_cat code, p.mdse_cat label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
-       FROM po_lines p WHERE p.sloc='S002' GROUP BY p.mdse_cat ORDER BY value DESC`,
-    ).all();
-  } else {
-    rows = await env.DB.prepare(
-      `SELECT p.po_number, p.order_date, v.name vendor, a.article_code, a.description,
-              p.order_qty, -p.line_value_cents value
-       FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
-       WHERE p.sloc='S002' ORDER BY p.order_date DESC LIMIT 1000`,
-    ).all();
-  }
+  const rowsSql =
+    groupBy === "vendor"
+      ? `SELECT v.vendor_code code, v.name label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
+         FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id WHERE p.sloc='S002'
+         GROUP BY v.id ORDER BY value DESC`
+      : groupBy === "article"
+        ? `SELECT a.article_code code, a.description label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
+           FROM po_lines p LEFT JOIN articles a ON a.id=p.article_id WHERE p.sloc='S002'
+           GROUP BY a.id ORDER BY value DESC`
+        : groupBy === "category"
+          ? `SELECT p.mdse_cat code, p.mdse_cat label, -SUM(COALESCE(p.line_value_cents,0)) value, COUNT(*) lines
+             FROM po_lines p WHERE p.sloc='S002' GROUP BY p.mdse_cat ORDER BY value DESC`
+          : `SELECT p.po_number, p.order_date, v.name vendor, a.article_code, a.description,
+                    p.order_qty, -p.line_value_cents value
+             FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
+             WHERE p.sloc='S002' ORDER BY p.order_date DESC LIMIT 1000`;
+
+  // totals + the (groupBy-dependent) rows query are two independent S002 scans.
+  const [totals, rows] = await Promise.all([
+    env.DB.prepare(totalsSql).first(),
+    env.DB.prepare(rowsSql).all(),
+  ]);
   return json({ groupBy, totals, rows: rows.results });
 }
 
@@ -634,24 +642,27 @@ export async function handleGrReconciliation(env: Env): Promise<Response> {
   ).first<{ id: number }>();
   if (!latest) return json({ grUpload: null, matched: [], summary: {} });
 
-  const byVendor = await env.DB.prepare(
-    `SELECT g.dept_code, g.dept_name,
+  // latest must resolve first (gates the empty response + supplies upload_id);
+  // the per-dept breakdown and the match summary then run concurrently.
+  const [byVendor, match] = await Promise.all([
+    env.DB.prepare(
+      `SELECT g.dept_code, g.dept_name,
             COUNT(*) gr_lines, SUM(COALESCE(g.cost_zar,0)) gr_cost,
             (SELECT COUNT(*) FROM po_lines p WHERE p.po_number = g.po_number) AS po_match
      FROM gr_lines g WHERE g.upload_id = ? GROUP BY g.dept_code ORDER BY gr_cost DESC`,
-  )
-    .bind(latest.id)
-    .all();
-
-  const match = await env.DB.prepare(
-    `SELECT
+    )
+      .bind(latest.id)
+      .all(),
+    env.DB.prepare(
+      `SELECT
         COUNT(*) gr_lines,
         SUM(CASE WHEN EXISTS (SELECT 1 FROM po_lines p WHERE p.po_number=g.po_number) THEN 1 ELSE 0 END) matched,
         SUM(CASE WHEN NOT EXISTS (SELECT 1 FROM po_lines p WHERE p.po_number=g.po_number) THEN 1 ELSE 0 END) unmatched
      FROM gr_lines g WHERE g.upload_id = ?`,
-  )
-    .bind(latest.id)
-    .first();
+    )
+      .bind(latest.id)
+      .first(),
+  ]);
   return json({ grUploadId: latest.id, summary: match, byDept: byVendor.results });
 }
 
@@ -732,8 +743,11 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
   const lo = bounds?.mn && from < bounds.mn ? bounds.mn : from;
   const hi = bounds?.mx && to > bounds.mx ? bounds.mx : to;
 
-  const rows = await env.DB.prepare(
-    `${fimResolvedCte("WITH")}
+  // The aggregate `rows` depends on the clamped bounds above, but the guideline
+  // lookup and the Fresh-B config are independent of that chain — overlap all three.
+  const [rows, guides, fb] = await Promise.all([
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
      SELECT dept_code,
             MAX(dept_name) dept_name,
             SUM(net_sales_zar)       sales,
@@ -752,14 +766,15 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
             GROUP_CONCAT(DISTINCT report_type) report_types
      FROM fr
      GROUP BY dept_code`,
-  )
-    .bind(lo, hi)
-    .all<Record<string, number | string | null>>();
-
-  const guides = await env.DB.prepare(
-    `SELECT dept_code, dept_name, dept_group, guideline_margin_pct FROM dept_guidelines g
+    )
+      .bind(lo, hi)
+      .all<Record<string, number | string | null>>(),
+    env.DB.prepare(
+      `SELECT dept_code, dept_name, dept_group, guideline_margin_pct FROM dept_guidelines g
      WHERE effective_from = (SELECT MAX(effective_from) FROM dept_guidelines g2 WHERE g2.dept_code = g.dept_code)`,
-  ).all<{ dept_code: string; dept_name: string; dept_group: string; guideline_margin_pct: number }>();
+    ).all<{ dept_code: string; dept_name: string; dept_group: string; guideline_margin_pct: number }>(),
+    getFreshBConfig(env),
+  ]);
   const gmap = new Map((guides.results ?? []).map((g) => [g.dept_code, g]));
 
   const r2 = (n: unknown) => (n == null ? null : Math.round(Number(n) * 100) / 100);
@@ -805,7 +820,7 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
   // Fresh-B margin suppression: daily/in-progress margin is unreliable until the
   // week is stocktaken. If the window extends past the last loaded stocktake,
   // null out margin (and variance) for Fresh-B depts — sales/waste stay intact.
-  const fb = await getFreshBConfig(env);
+  // (fb fetched concurrently with rows/guides above.)
   if (to > fb.marginDate) {
     for (const d of departments) {
       if (fb.depts.has(d.deptCode)) {
@@ -898,26 +913,27 @@ export async function handleGrPeriod(req: Request, env: Env): Promise<Response> 
   const OVERLAP = `JOIN uploads u ON u.id = g.upload_id
      WHERE COALESCE(u.report_date, g.gr_date) <= ?
        AND COALESCE(u.report_date_to, u.report_date, g.gr_date) >= ?`;
-  const totals = await env.DB.prepare(
-    `SELECT COUNT(*) lines, COALESCE(${COST},0) cost, COALESCE(SUM(g.sell_zar),0) sell
+  // Store totals, per-dept rows, and the guideline lookup are independent — overlap them.
+  const [totals, rows, guides] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) lines, COALESCE(${COST},0) cost, COALESCE(SUM(g.sell_zar),0) sell
      FROM gr_lines g ${OVERLAP}`,
-  )
-    .bind(to, from)
-    .first<{ lines: number; cost: number; sell: number }>();
-
-  const rows = await env.DB.prepare(
-    `SELECT g.dept_code, MAX(g.dept_name) dept_name, COUNT(*) lines,
+    )
+      .bind(to, from)
+      .first<{ lines: number; cost: number; sell: number }>(),
+    env.DB.prepare(
+      `SELECT g.dept_code, MAX(g.dept_name) dept_name, COUNT(*) lines,
             COALESCE(${COST},0) cost, COALESCE(SUM(g.sell_zar),0) sell
      FROM gr_lines g ${OVERLAP}
      GROUP BY g.dept_code ORDER BY sell DESC`,
-  )
-    .bind(to, from)
-    .all<{ dept_code: string; dept_name: string; lines: number; cost: number; sell: number }>();
-
-  const guides = await env.DB.prepare(
-    `SELECT dept_code, guideline_margin_pct FROM dept_guidelines g
+    )
+      .bind(to, from)
+      .all<{ dept_code: string; dept_name: string; lines: number; cost: number; sell: number }>(),
+    env.DB.prepare(
+      `SELECT dept_code, guideline_margin_pct FROM dept_guidelines g
      WHERE effective_from = (SELECT MAX(effective_from) FROM dept_guidelines g2 WHERE g2.dept_code = g.dept_code)`,
-  ).all<{ dept_code: string; guideline_margin_pct: number }>();
+    ).all<{ dept_code: string; guideline_margin_pct: number }>(),
+  ]);
   const gmap = new Map((guides.results ?? []).map((g) => [g.dept_code, g.guideline_margin_pct]));
 
   const blended = (cost: number, sell: number) => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
@@ -951,9 +967,12 @@ export async function handleGrPeriod(req: Request, env: Env): Promise<Response> 
 
 /** GET /api/meta/range — min/max dates across PO, FIM and GR, for screen defaults. */
 export async function handleMetaRange(env: Env): Promise<Response> {
-  const po = await env.DB.prepare(`SELECT MIN(order_date) mn, MAX(order_date) mx FROM po_lines`).first<{ mn: string | null; mx: string | null }>();
-  const fim = await env.DB.prepare(`SELECT MIN(date_from) mn, MAX(date_to) mx FROM fim_daily`).first<{ mn: string | null; mx: string | null }>();
-  const gr = await env.DB.prepare(`SELECT MIN(gr_date) mn, MAX(gr_date) mx FROM gr_lines`).first<{ mn: string | null; mx: string | null }>();
+  // Three independent MIN/MAX scans over separate tables — run concurrently.
+  const [po, fim, gr] = await Promise.all([
+    env.DB.prepare(`SELECT MIN(order_date) mn, MAX(order_date) mx FROM po_lines`).first<{ mn: string | null; mx: string | null }>(),
+    env.DB.prepare(`SELECT MIN(date_from) mn, MAX(date_to) mx FROM fim_daily`).first<{ mn: string | null; mx: string | null }>(),
+    env.DB.prepare(`SELECT MIN(gr_date) mn, MAX(gr_date) mx FROM gr_lines`).first<{ mn: string | null; mx: string | null }>(),
+  ]);
   return json({
     po: { min: po?.mn ?? null, max: po?.mx ?? null },
     fim: { min: fim?.mn ?? null, max: fim?.mx ?? null },
@@ -1566,35 +1585,47 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
   const { key, from, to, label } = await resolvePeriod(env, q.get("period"), q.get("from"), q.get("to"));
   const t = thresholds(env);
 
+  // Eight independent reads once the period is resolved — the PO gross/returns/net
+  // split, GR actual, the weekly cap, the fiscal weeks overlapping the period, the
+  // store-budget map, the open-committed reconciliation, the sales windows, and the
+  // last complete FIM week — all run concurrently instead of one after another.
+  const [poGrn, grRow, defaultCapZar, periodWeeksRes, storeMap, recon, sw, prevWeek] = await Promise.all([
+    poGrnCents(env, from, to),
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell FROM gr_lines WHERE gr_date >= ? AND gr_date <= ?`,
+    )
+      .bind(from, to)
+      .first<{ cost: number; sell: number }>(),
+    weeklyCapZar(env),
+    env.DB.prepare(
+      `SELECT fiscal_week_code, week_start, week_end FROM fiscal_weeks
+         WHERE week_start <= ? AND week_end >= ? ORDER BY week_start`,
+    )
+      .bind(to, from)
+      .all<{ fiscal_week_code: string; week_start: string; week_end: string }>(),
+    storeBudgetMap(env),
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar,
+            SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) lines FROM po_lines
+     WHERE COALESCE(sloc,'') != 'S002'`,
+    ).first<{ ordered_cents: number; received_zar: number; lines: number }>(),
+    salesWindowsCents(env),
+    prevCompleteFimWeek(env),
+  ]);
+
   // PO actual over order_date range, in cents: gross (S001) / returns (S002) /
   // net (all). The budget tile is measured on NET — returns reduce the spend.
-  const poGrn = await poGrnCents(env, from, to);
   const poGrossCents = poGrn.grossCents;
   const poReturnsCents = poGrn.returnsCents;
   const poActualCents = poGrn.netCents; // headline = net commitment
 
   // GR actual (cost) over gr_date range; gr_lines money is Rand.
-  const grRow = await env.DB.prepare(
-    `SELECT COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell FROM gr_lines WHERE gr_date >= ? AND gr_date <= ?`,
-  )
-    .bind(from, to)
-    .first<{ cost: number; sell: number }>();
   const grActualCents = Math.round(Number(grRow?.cost ?? 0) * 100);
   const grSellCents = Math.round(Number(grRow?.sell ?? 0) * 100);
 
   // Store-level (TOTAL) budgets summed across the fiscal weeks overlapping [from,to];
   // a week with no store row falls back to the default weekly cap (PO & GR).
-  const defaultCapZar = await weeklyCapZar(env);
-  const periodWeeks =
-    (
-      await env.DB.prepare(
-        `SELECT fiscal_week_code, week_start, week_end FROM fiscal_weeks
-         WHERE week_start <= ? AND week_end >= ? ORDER BY week_start`,
-      )
-        .bind(to, from)
-        .all<{ fiscal_week_code: string; week_start: string; week_end: string }>()
-    ).results ?? [];
-  const storeMap = await storeBudgetMap(env);
+  const periodWeeks = periodWeeksRes.results ?? [];
   let poBudgetZar = 0;
   let grBudgetZar = 0;
   for (const w of periodWeeks) {
@@ -1613,14 +1644,8 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
 
   // Open committed: PO ordered minus GR received (matches the dashboard KPI).
   // S001 ONLY — S002 returns are incoming credits, not future cash outflows.
-  const recon = await env.DB.prepare(
-    `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar,
-            SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) lines FROM po_lines
-     WHERE COALESCE(sloc,'') != 'S002'`,
-  ).first<{ ordered_cents: number; received_zar: number; lines: number }>();
   const openCommittedCents = Math.max(0, Math.round((recon?.ordered_cents ?? 0) - (recon?.received_zar ?? 0) * 100));
 
-  const sw = await salesWindowsCents(env);
   const latest = sw.latestDate;
   const weekStart = sw.weekStart;
   const monthStart = sw.monthStart;
@@ -1633,23 +1658,25 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
   let anyMonthSales = false;
   let daysElapsed = 7;
   if (latest && weekStart && monthStart) {
-    const wk = await env.DB.prepare(
-      `SELECT fiscal_week_code, week_start FROM fiscal_weeks WHERE week_start <= ? AND week_end >= ? LIMIT 1`,
-    )
-      .bind(latest, latest)
-      .first<{ fiscal_week_code: string; week_start: string }>();
+    // The containing-week lookup and the month's week list both key off `latest`
+    // and are independent — fetch them concurrently.
+    const [wk, mWeeksRes] = await Promise.all([
+      env.DB.prepare(
+        `SELECT fiscal_week_code, week_start FROM fiscal_weeks WHERE week_start <= ? AND week_end >= ? LIMIT 1`,
+      )
+        .bind(latest, latest)
+        .first<{ fiscal_week_code: string; week_start: string }>(),
+      env.DB.prepare(`SELECT fiscal_week_code FROM fiscal_weeks WHERE week_end >= ? AND week_start <= ?`)
+        .bind(monthStart, latest)
+        .all<{ fiscal_week_code: string }>(),
+    ]);
     if (wk) {
       weekSalesBudgetZar = storeMap.get(wk.fiscal_week_code)?.sales ?? null;
       daysElapsed = Math.round((Date.parse(latest) - Date.parse(wk.week_start)) / 86400000) + 1;
       if (daysElapsed < 1) daysElapsed = 1;
       if (daysElapsed > 7) daysElapsed = 7;
     }
-    const mWeeks =
-      (
-        await env.DB.prepare(`SELECT fiscal_week_code FROM fiscal_weeks WHERE week_end >= ? AND week_start <= ?`)
-          .bind(monthStart, latest)
-          .all<{ fiscal_week_code: string }>()
-      ).results ?? [];
+    const mWeeks = mWeeksRes.results ?? [];
     for (const w of mWeeks) {
       const s = storeMap.get(w.fiscal_week_code)?.sales;
       if (s != null) {
@@ -1673,7 +1700,7 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
 
   // §6: FIM figures on the dashboard use the last COMPLETE fiscal week, not the
   // distorted current partial week. One margin chip is shared by all Sales tiles.
-  const prevWeek = await prevCompleteFimWeek(env);
+  // (prevWeek fetched concurrently in the batch above.)
   const fimAgg = prevWeek ? await fimWeekAggregate(env, prevWeek.from, prevWeek.to) : null;
   const fimMarginPct = fimAgg?.marginPct ?? null;
 
@@ -1758,34 +1785,20 @@ export async function handleDashboardCashflow(_req: Request, env: Env): Promise<
   const today = new Date().toISOString().slice(0, 10);
   const dayDiff = (iso: string) => Math.round((Date.parse(iso) - Date.parse(today)) / 86_400_000);
 
-  const pnpRows =
-    (
-      await env.DB.prepare(
-        `SELECT fw.fiscal_week_code code, fw.week_end week_end,
+  // Two independent cash-outflow projections (PnP corporate weeks + meat suppliers)
+  // — run their heavy join-aggregations concurrently.
+  const [pnpRowsRes, meatRowsRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT fw.fiscal_week_code code, fw.week_end week_end,
                 COALESCE(fw.statement_due_date, date(fw.week_end,'+28 days')) pay_monday,
                 COALESCE(SUM(${PURCH}),0) val_cents
          FROM fiscal_weeks fw
          JOIN po_lines p ON p.order_date >= fw.week_start AND p.order_date <= fw.week_end
          GROUP BY fw.fiscal_week_code
          HAVING val_cents > 0`,
-      ).all<{ code: string; week_end: string; pay_monday: string; val_cents: number }>()
-    ).results ?? [];
-  const pnpPayments = pnpRows
-    .filter((r) => r.pay_monday >= today)
-    .sort((a, b) => a.pay_monday.localeCompare(b.pay_monday))
-    .slice(0, 3)
-    .map((r) => ({
-      invoiceWeekCode: r.code,
-      invoiceWeekEnding: r.week_end,
-      paymentDueMonday: r.pay_monday,
-      estimatedValueZar: Math.round(Number(r.val_cents)) / 100,
-      daysUntilDue: dayDiff(r.pay_monday),
-    }));
-
-  const meatRows =
-    (
-      await env.DB.prepare(
-        `SELECT g.gr_date gr_date, date(g.gr_date,'+14 days') due_date,
+    ).all<{ code: string; week_end: string; pay_monday: string; val_cents: number }>(),
+    env.DB.prepare(
+      `SELECT g.gr_date gr_date, date(g.gr_date,'+14 days') due_date,
                 COALESCE(SUM(g.cost_zar),0) val, MAX(v.name) vendor_name
          FROM gr_lines g
          LEFT JOIN po_lines p ON p.po_number = g.po_number
@@ -1798,8 +1811,22 @@ export async function handleDashboardCashflow(_req: Request, env: Env): Promise<
          GROUP BY g.gr_date
          HAVING val > 0
          ORDER BY due_date`,
-      ).all<{ gr_date: string; due_date: string; val: number; vendor_name: string | null }>()
-    ).results ?? [];
+    ).all<{ gr_date: string; due_date: string; val: number; vendor_name: string | null }>(),
+  ]);
+  const pnpRows = pnpRowsRes.results ?? [];
+  const meatRows = meatRowsRes.results ?? [];
+  const pnpPayments = pnpRows
+    .filter((r) => r.pay_monday >= today)
+    .sort((a, b) => a.pay_monday.localeCompare(b.pay_monday))
+    .slice(0, 3)
+    .map((r) => ({
+      invoiceWeekCode: r.code,
+      invoiceWeekEnding: r.week_end,
+      paymentDueMonday: r.pay_monday,
+      estimatedValueZar: Math.round(Number(r.val_cents)) / 100,
+      daysUntilDue: dayDiff(r.pay_monday),
+    }));
+
   const meatPayments = meatRows.map((r) => ({
     grDate: r.gr_date,
     dueDate: r.due_date,
@@ -1826,10 +1853,11 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
     to = to ?? r.to;
   }
 
-  const rows =
-    (
-      await env.DB.prepare(
-        `${fimResolvedCte("WITH")}
+  // Three independent reads: the range aggregate (rows), the range-independent
+  // 13-week trend, and the open waste/shrink anomalies — fetch concurrently.
+  const [rowsRes, trendRowsRes, anomRes] = await Promise.all([
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
          SELECT dept_code, MAX(dept_name) dept_name,
                 COALESCE(SUM(net_sales_zar),0) sales,
                 COALESCE(SUM(total_shortages_zar),0) shortages,
@@ -1838,10 +1866,24 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
                 COALESCE(SUM(rtc_zar),0) rtc
          FROM fr
          GROUP BY dept_code`,
-      )
-        .bind(from, to)
-        .all<{ dept_code: string; dept_name: string | null; sales: number; shortages: number; shrink: number; waste: number; rtc: number }>()
-    ).results ?? [];
+    )
+      .bind(from, to)
+      .all<{ dept_code: string; dept_name: string | null; sales: number; shortages: number; shrink: number; waste: number; rtc: number }>(),
+    env.DB.prepare(
+      `SELECT fiscal_week_start ws, fiscal_week_end we,
+                COALESCE(SUM(shrink_zar),0) shrink, COALESCE(SUM(waste_zar),0) waste,
+                COALESCE(SUM(net_sales_zar),0) sales
+         FROM fim_daily WHERE dept_code != 'TOTAL'
+         GROUP BY fiscal_week_start, fiscal_week_end
+         ORDER BY fiscal_week_end DESC LIMIT 13`,
+    ).all<{ ws: string; we: string; shrink: number; waste: number; sales: number }>(),
+    env.DB.prepare(
+      `SELECT id, type, severity, message, detected_at FROM anomalies
+         WHERE resolved = 0 AND type IN ('FIM_HIGH_WASTE','FIM_HIGH_SHRINK')
+         ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
+    ).all(),
+  ]);
+  const rows = rowsRes.results ?? [];
 
   const r2 = (n: number) => Math.round(n * 100) / 100;
   const pctOf = (n: number, base: number) => (base > 0 ? Math.round((n / base) * 1000) / 10 : null);
@@ -1874,18 +1916,8 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
     totalRtcZar: r2(totalRtc),
   };
 
-  // 13-week trend (independent of the selected range).
-  const trendRows =
-    (
-      await env.DB.prepare(
-        `SELECT fiscal_week_start ws, fiscal_week_end we,
-                COALESCE(SUM(shrink_zar),0) shrink, COALESCE(SUM(waste_zar),0) waste,
-                COALESCE(SUM(net_sales_zar),0) sales
-         FROM fim_daily WHERE dept_code != 'TOTAL'
-         GROUP BY fiscal_week_start, fiscal_week_end
-         ORDER BY fiscal_week_end DESC LIMIT 13`,
-      ).all<{ ws: string; we: string; shrink: number; waste: number; sales: number }>()
-    ).results ?? [];
+  // 13-week trend (independent of the selected range; fetched above).
+  const trendRows = trendRowsRes.results ?? [];
   const trend = trendRows
     .map((r) => ({
       weekEnding: r.we,
@@ -1895,14 +1927,7 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
     }))
     .reverse();
 
-  const anomalies =
-    (
-      await env.DB.prepare(
-        `SELECT id, type, severity, message, detected_at FROM anomalies
-         WHERE resolved = 0 AND type IN ('FIM_HIGH_WASTE','FIM_HIGH_SHRINK')
-         ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
-      ).all()
-    ).results ?? [];
+  const anomalies = anomRes.results ?? [];
 
   return json({ period: { from, to, label: fmtRangeLabel(from!, to!) }, summary, byDept, trend, anomalies });
 }
@@ -2057,49 +2082,47 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
   else if (status === "unmatched-po") where.push("p.is_fully_received = 0");
   const scope = where.length ? "WHERE " + where.join(" AND ") : "";
 
-  const summary = await env.DB.prepare(
-    `SELECT COUNT(*) lines, COALESCE(SUM(${PURCH}),0) value_cents
-     FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${scope}`,
-  )
-    .bind(...binds)
-    .first<{ lines: number; value_cents: number }>();
+  // Returns to vendor (S002) over the period scope, grouped by vendor (most negative first).
+  const retScope = baseWhere.length ? baseScope + " AND p.sloc = 'S002'" : "WHERE p.sloc = 'S002'";
 
-  // Summary cards over the period scope (status-independent): gross/returns/net,
-  // line counts and distinct vendor count.
-  const cards = await env.DB.prepare(
-    `SELECT COALESCE(SUM(${PURCH}),0) gross_cents,
+  // Five independent po_lines reads — status summary, period cards (gross/returns/
+  // net), the GLOBAL open-committed figure, returns-by-vendor, and the line page —
+  // all run concurrently instead of one after another.
+  const [summary, cards, oc, retRows, rows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) lines, COALESCE(SUM(${PURCH}),0) value_cents
+     FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${scope}`,
+    )
+      .bind(...binds)
+      .first<{ lines: number; value_cents: number }>(),
+    // Summary cards over the period scope (status-independent): gross/returns/net,
+    // line counts and distinct vendor count.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(${PURCH}),0) gross_cents,
             COALESCE(SUM(p.line_value_cents),0) net_cents,
             COUNT(CASE WHEN COALESCE(p.sloc,'') != 'S002' THEN 1 END) gross_lines,
             COUNT(CASE WHEN p.sloc = 'S002' THEN 1 END) returns_lines,
             COUNT(*) net_lines,
             COUNT(DISTINCT CASE WHEN COALESCE(p.sloc,'') != 'S002' THEN p.vendor_id END) vendors
      FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${baseScope}`,
-  )
-    .bind(...baseBinds)
-    .first<{ gross_cents: number; net_cents: number; gross_lines: number; returns_lines: number; net_lines: number; vendors: number }>();
-  const grossCents = Number(cards?.gross_cents ?? 0);
-  const netCents = Number(cards?.net_cents ?? 0);
-
-  // Open Committed — GLOBAL, S001 only. Same definition as the dashboard KPI
-  // (ordered minus received across all S001 lines); returns (S002) excluded.
-  const oc = await env.DB.prepare(
-    `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar
+    )
+      .bind(...baseBinds)
+      .first<{ gross_cents: number; net_cents: number; gross_lines: number; returns_lines: number; net_lines: number; vendors: number }>(),
+    // Open Committed — GLOBAL, S001 only. Same definition as the dashboard KPI
+    // (ordered minus received across all S001 lines); returns (S002) excluded.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar
      FROM po_lines WHERE COALESCE(sloc,'') != 'S002'`,
-  ).first<{ ordered_cents: number; received_zar: number }>();
-  const openCommittedCents = Math.max(0, Math.round((oc?.ordered_cents ?? 0) - (oc?.received_zar ?? 0) * 100));
-
-  // Returns to vendor (S002) over the period scope, grouped by vendor (most negative first).
-  const retScope = baseWhere.length ? baseScope + " AND p.sloc = 'S002'" : "WHERE p.sloc = 'S002'";
-  const retRows = await env.DB.prepare(
-    `SELECT v.vendor_code code, v.name, COUNT(*) lines, COALESCE(SUM(p.line_value_cents),0) ret_cents
+    ).first<{ ordered_cents: number; received_zar: number }>(),
+    env.DB.prepare(
+      `SELECT v.vendor_code code, v.name, COUNT(*) lines, COALESCE(SUM(p.line_value_cents),0) ret_cents
      FROM po_lines p LEFT JOIN vendors v ON v.id = p.vendor_id ${retScope}
      GROUP BY p.vendor_id ORDER BY ret_cents ASC`,
-  )
-    .bind(...baseBinds)
-    .all<{ code: string | null; name: string | null; lines: number; ret_cents: number }>();
-
-  const rows = await env.DB.prepare(
-    `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor_name,
+    )
+      .bind(...baseBinds)
+      .all<{ code: string | null; name: string | null; lines: number; ret_cents: number }>(),
+    env.DB.prepare(
+      `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor_name,
             a.article_code, a.description article_desc, substr(p.mdse_cat,1,3) sap_dept_code,
             p.order_qty, COALESCE(p.line_value_cents,0) line_value_cents,
             COALESCE(p.received_qty,0) received_qty, COALESCE(p.open_value_cents,0) open_value_cents,
@@ -2107,9 +2130,13 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
             CAST(julianday('now') - julianday(COALESCE(p.last_gr_date, p.order_date)) AS INTEGER) days_outstanding
      FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
      ${scope} ORDER BY p.order_date DESC, p.po_number LIMIT ? OFFSET ?`,
-  )
-    .bind(...binds, limit, offset)
-    .all<Record<string, number | string | null>>();
+    )
+      .bind(...binds, limit, offset)
+      .all<Record<string, number | string | null>>(),
+  ]);
+  const grossCents = Number(cards?.gross_cents ?? 0);
+  const netCents = Number(cards?.net_cents ?? 0);
+  const openCommittedCents = Math.max(0, Math.round((oc?.ordered_cents ?? 0) - (oc?.received_zar ?? 0) * 100));
 
   const lines = (rows.results ?? []).map((r) => {
     const rec = reconcileLine({
@@ -2178,21 +2205,21 @@ interface WbRow {
  * Settings editor. defaultCapZar is the fallback weekly cap (Rand).
  */
 export async function handleGetWeeklyBudgets(env: Env): Promise<Response> {
-  const defaultCapZar = await weeklyCapZar(env);
-  const fw =
-    (
-      await env.DB.prepare(
-        `SELECT fiscal_week_code, week_start, week_end, week_no FROM fiscal_weeks
+  // Weekly cap setting, the fiscal-week window, and the stored budgets are three
+  // independent lookups — fetch them concurrently.
+  const [defaultCapZar, fwRes, rowsRes] = await Promise.all([
+    weeklyCapZar(env),
+    env.DB.prepare(
+      `SELECT fiscal_week_code, week_start, week_end, week_no FROM fiscal_weeks
          WHERE week_end >= date('now','-56 days') AND week_start <= date('now','+28 days')
          ORDER BY week_start DESC`,
-      ).all<{ fiscal_week_code: string; week_start: string; week_end: string; week_no: number }>()
-    ).results ?? [];
-  const rows =
-    (
-      await env.DB.prepare(
-        `SELECT week_code, budget_type, department, sales_budget_zar, po_budget_zar, gr_budget_zar FROM weekly_budgets`,
-      ).all<WbRow>()
-    ).results ?? [];
+    ).all<{ fiscal_week_code: string; week_start: string; week_end: string; week_no: number }>(),
+    env.DB.prepare(
+      `SELECT week_code, budget_type, department, sales_budget_zar, po_budget_zar, gr_budget_zar FROM weekly_budgets`,
+    ).all<WbRow>(),
+  ]);
+  const fw = fwRes.results ?? [];
+  const rows = rowsRes.results ?? [];
   const byWeek = new Map<string, WbRow[]>();
   for (const r of rows) {
     const a = byWeek.get(r.week_code) ?? [];
@@ -2283,80 +2310,79 @@ function sumDays(rows: { d: string; v: number }[], start: string, end: string): 
  * customer_counts (daily), departments from FIM (weekly). PO from po_lines, GR from gr_lines.
  */
 export async function handleBudgetsSummary(env: Env): Promise<Response> {
-  const defaultCapZar = await weeklyCapZar(env);
   const today = new Date().toISOString().slice(0, 10);
-  const fw =
-    (
-      await env.DB.prepare(
-        `SELECT fiscal_week_code, week_start, week_end, week_no FROM fiscal_weeks
+  // Cap setting + the fiscal-week window are independent (fw also gates the empty
+  // response and supplies the min/max range binds) — fetch both concurrently.
+  const [defaultCapZar, fwRes] = await Promise.all([
+    weeklyCapZar(env),
+    env.DB.prepare(
+      `SELECT fiscal_week_code, week_start, week_end, week_no FROM fiscal_weeks
          WHERE week_end >= date('now','-56 days') AND week_start <= date('now','+28 days')
          ORDER BY week_start DESC`,
-      ).all<{ fiscal_week_code: string; week_start: string; week_end: string; week_no: number }>()
-    ).results ?? [];
+    ).all<{ fiscal_week_code: string; week_start: string; week_end: string; week_no: number }>(),
+  ]);
+  const fw = fwRes.results ?? [];
   if (fw.length === 0) return json({ defaultCapZar, depts: BUDGET_DEPTS, weeks: [] });
   const maxEnd = fw[0]!.week_end;
   const minStart = fw[fw.length - 1]!.week_start;
 
-  const budgetRows =
-    (
-      await env.DB.prepare(
-        `SELECT week_code, budget_type, department, sales_budget_zar, po_budget_zar, gr_budget_zar FROM weekly_budgets`,
-      ).all<WbRow>()
-    ).results ?? [];
-  const bKey = (wc: string, ty: string, dp: string) => wc + "|" + ty + "|" + dp;
-  const bMap = new Map(budgetRows.map((r) => [bKey(r.week_code, r.budget_type, r.department), r]));
-
   const deptCodes = BUDGET_DEPTS.map((d) => d.code);
   const inList = "('" + deptCodes.join("','") + "')";
-  const dayRows = async (sql: string) =>
-    ((await env.DB.prepare(sql).bind(minStart, maxEnd).all<{ d: string; v: number }>()).results ?? []);
-  const [salesByDay, grByDay] = await Promise.all([
-    dayRows(`SELECT cal_date d, COALESCE(SUM(sales_ty_cents),0) v FROM customer_counts WHERE cal_date BETWEEN ? AND ? GROUP BY cal_date`),
-    dayRows(`SELECT gr_date d, COALESCE(SUM(cost_zar),0) v FROM gr_lines WHERE gr_date BETWEEN ? AND ? GROUP BY gr_date`),
-  ]);
-  // PO per day: gross (S001) and net (all) so weekly variance can be net-based.
-  const poByDay =
-    (
-      await env.DB.prepare(
-        `SELECT order_date d, COALESCE(SUM(${PURCH}),0) g, COALESCE(SUM(p.line_value_cents),0) n
+
+  // The stored budgets plus six day-keyed actual series (all bound to the same
+  // [minStart,maxEnd] window) are mutually independent — run them concurrently.
+  // Comments on the individual series:
+  //  - poByDay: gross (S001) and net (all) so weekly variance can be net-based.
+  //  - grDept: gr_lines.dept_code carries SAP codes like "Z1/F09"; normalize to
+  //    the bare suffix ("F09") to match FIM/PO dept codes (guidelineKeyForDept()).
+  //  - fimDept: per-day, finest-granularity-resolved FIM sales so weekly buckets
+  //    align with the day-keyed PO/GR/sales series (no boundary-straddle miscount).
+  const [budgetRowsRes, salesByDayRes, grByDayRes, poByDayRes, poDeptRes, grDeptRes, fimDeptRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT week_code, budget_type, department, sales_budget_zar, po_budget_zar, gr_budget_zar FROM weekly_budgets`,
+    ).all<WbRow>(),
+    env.DB.prepare(`SELECT cal_date d, COALESCE(SUM(sales_ty_cents),0) v FROM customer_counts WHERE cal_date BETWEEN ? AND ? GROUP BY cal_date`)
+      .bind(minStart, maxEnd)
+      .all<{ d: string; v: number }>(),
+    env.DB.prepare(`SELECT gr_date d, COALESCE(SUM(cost_zar),0) v FROM gr_lines WHERE gr_date BETWEEN ? AND ? GROUP BY gr_date`)
+      .bind(minStart, maxEnd)
+      .all<{ d: string; v: number }>(),
+    env.DB.prepare(
+      `SELECT order_date d, COALESCE(SUM(${PURCH}),0) g, COALESCE(SUM(p.line_value_cents),0) n
          FROM po_lines p WHERE p.order_date BETWEEN ? AND ? GROUP BY order_date`,
-      )
-        .bind(minStart, maxEnd)
-        .all<{ d: string; g: number; n: number }>()
-    ).results ?? [];
-  const poDept =
-    (
-      await env.DB.prepare(
-        `SELECT order_date d, substr(p.mdse_cat,1,3) dept,
+    )
+      .bind(minStart, maxEnd)
+      .all<{ d: string; g: number; n: number }>(),
+    env.DB.prepare(
+      `SELECT order_date d, substr(p.mdse_cat,1,3) dept,
                 COALESCE(SUM(${PURCH}),0) g, COALESCE(SUM(p.line_value_cents),0) n FROM po_lines p
          WHERE p.order_date BETWEEN ? AND ? AND substr(p.mdse_cat,1,3) IN ${inList} GROUP BY d, dept`,
-      )
-        .bind(minStart, maxEnd)
-        .all<{ d: string; dept: string; g: number; n: number }>()
-    ).results ?? [];
-  // gr_lines.dept_code carries SAP codes like "Z1/F09"; normalize to the bare
-  // suffix ("F09") to match FIM/PO dept codes (mirrors guidelineKeyForDept()).
-  const grDept =
-    (
-      await env.DB.prepare(
-        `SELECT gr_date d, substr(dept_code, instr(dept_code,'/')+1) dept, COALESCE(SUM(cost_zar),0) v FROM gr_lines
+    )
+      .bind(minStart, maxEnd)
+      .all<{ d: string; dept: string; g: number; n: number }>(),
+    env.DB.prepare(
+      `SELECT gr_date d, substr(dept_code, instr(dept_code,'/')+1) dept, COALESCE(SUM(cost_zar),0) v FROM gr_lines
          WHERE gr_date BETWEEN ? AND ? AND substr(dept_code, instr(dept_code,'/')+1) IN ${inList} GROUP BY d, dept`,
-      )
-        .bind(minStart, maxEnd)
-        .all<{ d: string; dept: string; v: number }>()
-    ).results ?? [];
-  // Per-day, finest-granularity-resolved FIM sales so weekly buckets align with
-  // the day-keyed PO/GR/sales series above (no boundary-straddle drop/double-count).
-  const fimDept =
-    (
-      await env.DB.prepare(
-        `${fimResolvedCte("WITH")}
+    )
+      .bind(minStart, maxEnd)
+      .all<{ d: string; dept: string; v: number }>(),
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
          SELECT day d, dept_code dept, COALESCE(SUM(net_sales_zar),0) v FROM fr
          WHERE dept_code IN ${inList} GROUP BY day, dept_code`,
-      )
-        .bind(minStart, maxEnd)
-        .all<{ d: string; dept: string; v: number }>()
-    ).results ?? [];
+    )
+      .bind(minStart, maxEnd)
+      .all<{ d: string; dept: string; v: number }>(),
+  ]);
+  const budgetRows = budgetRowsRes.results ?? [];
+  const bKey = (wc: string, ty: string, dp: string) => wc + "|" + ty + "|" + dp;
+  const bMap = new Map(budgetRows.map((r) => [bKey(r.week_code, r.budget_type, r.department), r]));
+  const salesByDay = salesByDayRes.results ?? [];
+  const grByDay = grByDayRes.results ?? [];
+  const poByDay = poByDayRes.results ?? [];
+  const poDept = poDeptRes.results ?? [];
+  const grDept = grDeptRes.results ?? [];
+  const fimDept = fimDeptRes.results ?? [];
 
   const varPct = (actualCents: number, budgetCents: number | null): number | null =>
     budgetCents != null && budgetCents > 0 ? Math.round(((actualCents - budgetCents) / budgetCents) * 1000) / 10 : null;
@@ -2448,30 +2474,34 @@ export async function handleFanScoreResponses(req: Request, env: Env): Promise<R
     week = latest?.w ?? null;
   }
   if (!week) return json({ hasData: false, weeks: [], responses: [] });
-  const weeks = await env.DB.prepare(
-    `SELECT week_ending FROM fan_score_weeks ORDER BY week_ending DESC`,
-  ).all<{ week_ending: string }>();
-  const wk = await env.DB.prepare(
-    `SELECT nps_tw, nps_lw, total_responses, scored_responses, promoters, passives, detractors, nps_computed
+  // Once the target week is known, the week list, its summary row, and its
+  // responses are three independent reads — fetch them concurrently.
+  const [weeks, wk, rows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT week_ending FROM fan_score_weeks ORDER BY week_ending DESC`,
+    ).all<{ week_ending: string }>(),
+    env.DB.prepare(
+      `SELECT nps_tw, nps_lw, total_responses, scored_responses, promoters, passives, detractors, nps_computed
      FROM fan_score_weeks WHERE week_ending = ?`,
-  )
-    .bind(week)
-    .first<{
-      nps_tw: number | null;
-      nps_lw: number | null;
-      total_responses: number;
-      scored_responses: number;
-      promoters: number;
-      passives: number;
-      detractors: number;
-      nps_computed: number | null;
-    }>();
-  const rows = await env.DB.prepare(
-    `SELECT score, classification, reason FROM fan_score_responses
+    )
+      .bind(week)
+      .first<{
+        nps_tw: number | null;
+        nps_lw: number | null;
+        total_responses: number;
+        scored_responses: number;
+        promoters: number;
+        passives: number;
+        detractors: number;
+        nps_computed: number | null;
+      }>(),
+    env.DB.prepare(
+      `SELECT score, classification, reason FROM fan_score_responses
      WHERE week_ending = ? ORDER BY (score IS NULL), score DESC, id ASC`,
-  )
-    .bind(week)
-    .all<{ score: number | null; classification: string | null; reason: string | null }>();
+    )
+      .bind(week)
+      .all<{ score: number | null; classification: string | null; reason: string | null }>(),
+  ]);
   return json({
     hasData: true,
     weekEnding: week,
@@ -2509,19 +2539,22 @@ async function tradingSummary(
   from: string,
   to: string,
 ): Promise<{ salesZar: number; poZar: number; grZar: number; posMarginPct: number | null; customersTy: number }> {
-  const po = await env.DB.prepare(
-    `SELECT COALESCE(SUM(${PURCH}),0) v FROM po_lines p WHERE p.order_date >= ? AND p.order_date <= ?`,
-  ).bind(from, to).first<{ v: number }>();
-  const gr = await env.DB.prepare(
-    `SELECT COALESCE(SUM(cost_zar),0) v FROM gr_lines WHERE gr_date >= ? AND gr_date <= ?`,
-  ).bind(from, to).first<{ v: number }>();
-  const fim = await env.DB.prepare(
-    `${fimResolvedCte("WITH")}
+  // Four independent window aggregates (PO, GR, FIM sales/COS, customers) — concurrent.
+  const [po, gr, fim, cc] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(${PURCH}),0) v FROM po_lines p WHERE p.order_date >= ? AND p.order_date <= ?`,
+    ).bind(from, to).first<{ v: number }>(),
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(cost_zar),0) v FROM gr_lines WHERE gr_date >= ? AND gr_date <= ?`,
+    ).bind(from, to).first<{ v: number }>(),
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
      SELECT COALESCE(SUM(net_sales_zar),0) s, COALESCE(SUM(total_cos_zar),0) c FROM fr`,
-  ).bind(from, to).first<{ s: number; c: number }>();
-  const cc = await env.DB.prepare(
-    `SELECT COALESCE(SUM(customers_ty),0) cty FROM customer_counts WHERE cal_date >= ? AND cal_date <= ?`,
-  ).bind(from, to).first<{ cty: number }>();
+    ).bind(from, to).first<{ s: number; c: number }>(),
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(customers_ty),0) cty FROM customer_counts WHERE cal_date >= ? AND cal_date <= ?`,
+    ).bind(from, to).first<{ cty: number }>(),
+  ]);
   const s = Number(fim?.s ?? 0);
   const c = Number(fim?.c ?? 0);
   return {
@@ -2580,11 +2613,35 @@ export async function handleTrading(req: Request, env: Env): Promise<Response> {
     customersPct: pctChange(cur.customersTy, prior.customersTy),
   };
 
-  const cc = await env.DB.prepare(
-    `SELECT COALESCE(SUM(customers_ty),0) cty, COALESCE(SUM(customers_ly),0) cly,
+  // Five independent period reads for the rest of the screen — customer counts,
+  // the FIM dept breakdown, the PO gross/returns/net split, and top vendors/
+  // articles — run concurrently instead of one after another.
+  const [cc, fimRowsRes, poGrn, vendorsRes, articlesRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(customers_ty),0) cty, COALESCE(SUM(customers_ly),0) cly,
             COALESCE(SUM(sales_ty_cents),0) sty, COALESCE(SUM(sales_ly_cents),0) sly, AVG(basket_ty_cents) basket
      FROM customer_counts WHERE cal_date >= ? AND cal_date <= ?`,
-  ).bind(from, to).first<{ cty: number; cly: number; sty: number; sly: number; basket: number | null }>();
+    ).bind(from, to).first<{ cty: number; cly: number; sty: number; sly: number; basket: number | null }>(),
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
+         SELECT dept_code, MAX(dept_name) dept_name, COALESCE(SUM(net_sales_zar),0) sales,
+                COALESCE(SUM(total_cos_zar),0) cos, COALESCE(SUM(waste_zar),0) waste, COALESCE(SUM(shrink_zar),0) shrink
+         FROM fr GROUP BY dept_code ORDER BY sales DESC`,
+    ).bind(from, to).all<{ dept_code: string; dept_name: string; sales: number; cos: number; waste: number; shrink: number }>(),
+    poGrnCents(env, from, to),
+    env.DB.prepare(
+      `SELECT v.vendor_code code, v.name,
+                COALESCE(SUM(${PURCH}),0) gross_cents,
+                COALESCE(SUM(p.line_value_cents),0) net_cents
+         FROM po_lines p JOIN vendors v ON v.id = p.vendor_id
+         WHERE p.order_date >= ? AND p.order_date <= ? GROUP BY v.id ORDER BY net_cents DESC LIMIT 10`,
+    ).bind(from, to).all<{ code: string; name: string; gross_cents: number; net_cents: number }>(),
+    env.DB.prepare(
+      `SELECT a.article_code code, a.description, COALESCE(SUM(${PURCH}),0) po_cents
+         FROM po_lines p JOIN articles a ON a.id = p.article_id
+         WHERE p.order_date >= ? AND p.order_date <= ? GROUP BY a.id ORDER BY po_cents DESC LIMIT 20`,
+    ).bind(from, to).all<{ code: string; description: string; po_cents: number }>(),
+  ]);
   const ccTy = Number(cc?.cty ?? 0);
   const ccLy = Number(cc?.cly ?? 0);
   const ccSty = Number(cc?.sty ?? 0);
@@ -2599,15 +2656,7 @@ export async function handleTrading(req: Request, env: Env): Promise<Response> {
     avgBasketZar: cc?.basket != null ? Math.round(cc.basket) / 100 : null,
   };
 
-  const fimRows =
-    (
-      await env.DB.prepare(
-        `${fimResolvedCte("WITH")}
-         SELECT dept_code, MAX(dept_name) dept_name, COALESCE(SUM(net_sales_zar),0) sales,
-                COALESCE(SUM(total_cos_zar),0) cos, COALESCE(SUM(waste_zar),0) waste, COALESCE(SUM(shrink_zar),0) shrink
-         FROM fr GROUP BY dept_code ORDER BY sales DESC`,
-      ).bind(from, to).all<{ dept_code: string; dept_name: string; sales: number; cos: number; waste: number; shrink: number }>()
-    ).results ?? [];
+  const fimRows = fimRowsRes.results ?? [];
   const fimDepts = fimRows.map((r) => {
     const s = Number(r.sales);
     const c = Number(r.cos);
@@ -2621,25 +2670,8 @@ export async function handleTrading(req: Request, env: Env): Promise<Response> {
     };
   });
 
-  const poGrn = await poGrnCents(env, from, to);
-  const vendors =
-    (
-      await env.DB.prepare(
-        `SELECT v.vendor_code code, v.name,
-                COALESCE(SUM(${PURCH}),0) gross_cents,
-                COALESCE(SUM(p.line_value_cents),0) net_cents
-         FROM po_lines p JOIN vendors v ON v.id = p.vendor_id
-         WHERE p.order_date >= ? AND p.order_date <= ? GROUP BY v.id ORDER BY net_cents DESC LIMIT 10`,
-      ).bind(from, to).all<{ code: string; name: string; gross_cents: number; net_cents: number }>()
-    ).results ?? [];
-  const articles =
-    (
-      await env.DB.prepare(
-        `SELECT a.article_code code, a.description, COALESCE(SUM(${PURCH}),0) po_cents
-         FROM po_lines p JOIN articles a ON a.id = p.article_id
-         WHERE p.order_date >= ? AND p.order_date <= ? GROUP BY a.id ORDER BY po_cents DESC LIMIT 20`,
-      ).bind(from, to).all<{ code: string; description: string; po_cents: number }>()
-    ).results ?? [];
+  const vendors = vendorsRes.results ?? [];
+  const articles = articlesRes.results ?? [];
 
   return json({
     period: { from, to, label, days, priorFrom, priorTo },
@@ -2819,28 +2851,28 @@ export async function handleBudgetsSuggest(req: Request, env: Env): Promise<Resp
   // Target weeks: [fromWeek,toWeek] by fiscal_week_code, else next 13 from today.
   const fromWeek = q.get("fromWeek");
   const toWeek = q.get("toWeek");
-  const targets =
+  const targetsStmt =
     fromWeek && toWeek
-      ? (
-          await env.DB.prepare(
-            `SELECT fiscal_week_code, week_no, week_start, week_end FROM fiscal_weeks
+      ? env.DB.prepare(
+          `SELECT fiscal_week_code, week_no, week_start, week_end FROM fiscal_weeks
              WHERE fiscal_week_code >= ? AND fiscal_week_code <= ? ORDER BY week_start`,
-          ).bind(fromWeek, toWeek).all<{ fiscal_week_code: string; week_no: number; week_start: string; week_end: string }>()
-        ).results ?? []
-      : (
-          await env.DB.prepare(
-            `SELECT fiscal_week_code, week_no, week_start, week_end FROM fiscal_weeks
+        ).bind(fromWeek, toWeek)
+      : env.DB.prepare(
+          `SELECT fiscal_week_code, week_no, week_start, week_end FROM fiscal_weeks
              WHERE week_end >= date('now') ORDER BY week_start LIMIT 13`,
-          ).all<{ fiscal_week_code: string; week_no: number; week_start: string; week_end: string }>()
-        ).results ?? [];
+        );
 
-  // Base-year weeks by week_no (for LY mapping).
-  const baseWeeks =
-    (
-      await env.DB.prepare(
-        `SELECT week_no, week_start, week_end FROM fiscal_weeks WHERE fiscal_year = ?`,
-      ).bind(baseYear).all<{ week_no: number; week_start: string; week_end: string }>()
-    ).results ?? [];
+  // The target weeks and the base-year week list (for LY mapping) are independent —
+  // fetch concurrently. (cashFlowFlags below depends on the resolved target codes,
+  // and the per-target FIM proration loop stays sequential.)
+  const [targetsRes, baseWeeksRes] = await Promise.all([
+    targetsStmt.all<{ fiscal_week_code: string; week_no: number; week_start: string; week_end: string }>(),
+    env.DB.prepare(
+      `SELECT week_no, week_start, week_end FROM fiscal_weeks WHERE fiscal_year = ?`,
+    ).bind(baseYear).all<{ week_no: number; week_start: string; week_end: string }>(),
+  ]);
+  const targets = targetsRes.results ?? [];
+  const baseWeeks = baseWeeksRes.results ?? [];
   const baseByNo = new Map(baseWeeks.map((b) => [b.week_no, b]));
 
   const flags = await cashFlowFlags(env, targets.map((t) => t.fiscal_week_code));
