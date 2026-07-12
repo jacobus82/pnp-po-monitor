@@ -624,11 +624,12 @@ function vtab(t){var d=window._vd;if(!d)return;
 function openArticle(code){openModal("Article "+esc(code),'<div class="loading">Loading\\u2026</div>');
   api("/api/articles/"+encodeURIComponent(code)).then(function(d){
     var k=d.kpis||{};
-    var head='<div class="cards kpis">'+kpi("Total value",R(k.total_value),null)+kpi("Avg price",R(k.avg_price),null)
+    var pb=k.price_basis==="unit"?("per "+esc(k.sku_uom||"unit")):"per order unit";
+    var head='<div class="cards kpis">'+kpi("Total value",R(k.total_value),null)+kpi("Unit price",R(k.avg_price),pb)
       +kpi("Min price",R(k.min_price),null)+kpi("Max price",R(k.max_price),null)+kpi("Orders",num(k.order_count),null)+'</div>';
-    var hist=(d.history||[]).map(function(h){return {label:h.order_date+" "+(h.vendor||""),value:(h.net_price_cents||0)/100}});
-    var chart='<div class="card"><h2>Price history</h2>'+lineChart(hist)+'</div>';
-    var lines=makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"vendor",label:"Vendor"},{key:"order_qty",label:"Qty",num:true},{key:"net_price_cents",label:"Price",num:true,fmt:R},{key:"line_value_cents",label:"Value",num:true,fmt:R},{key:"sloc",label:"SLoc"}],d.lines||[],{});
+    var hist=(d.history||[]).map(function(h){return {label:h.order_date+" "+(h.vendor||""),value:(h.unit_price_cents||0)/100}});
+    var chart='<div class="card"><h2>Price history <span class="muted small">(unit price)</span></h2>'+lineChart(hist)+'</div>';
+    var lines=makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"vendor",label:"Vendor"},{key:"order_qty",label:"Qty",num:true},{key:"net_price_cents",label:"Order price",num:true,fmt:R},{key:"line_value_cents",label:"Value",num:true,fmt:R},{key:"sloc",label:"SLoc"}],d.lines||[],{});
     openModal("Article "+esc(k.description||code)+' <span class="tag">'+esc(code)+"</span> <span class=\\"tag\\">"+esc(k.dept||"")+"</span>",head+chart+'<div class="card" style="margin-top:14px"><h2>Order lines</h2>'+lines+'</div>');
   }).catch(function(e){openModal("Article "+esc(code),'<div class="err">'+esc(e.message)+'</div>')});
 }
@@ -1454,7 +1455,7 @@ PAGES.articles=function(){loading();api("/api/articles?limit=1000").then(functio
   var rows=d.articles||[];
   setHTML('<div class="card"><h2>Article analysis (top '+rows.length+' by value)</h2>'+makeTable([
     {key:"code",label:"Article"},{key:"description",label:"Description",cls:"desc"},{key:"dept",label:"Dept",mobileHide:true},
-    {key:"total_value",label:"Total value",num:true,fmt:R},{key:"avg_price",label:"Avg price",num:true,fmt:R,mobileHide:true},{key:"order_count",label:"Orders",num:true}
+    {key:"total_value",label:"Total value",num:true,fmt:R},{key:"avg_price",label:"Unit price",num:true,mobileHide:true,html:function(r){return R(r.avg_price)+(r.price_basis==="unit"?'<span class="muted small"> /'+esc(r.sku_uom||"ea")+'</span>':'<span class="muted small" title="per order unit \\u2014 re-upload with SKU qty for per-unit price"> *</span>')}},{key:"order_count",label:"Orders",num:true}
   ],rows,{onRow:function(r){openArticle(r.code)}})+'</div>');
 }).catch(errBox)};
 

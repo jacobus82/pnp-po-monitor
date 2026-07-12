@@ -9,9 +9,11 @@ export interface ParsedPoLine {
   department?: string;
 
   orderQty?: number;
-  uom?: string;
-  netPriceCents?: number; // price per unit, in cents
-  lineValueCents?: number; // qty * price, in cents
+  uom?: string; // ORDER/price unit (e.g. CS = case); net price is per this unit
+  skuQty?: number; // total units in the article's base/SKU unit (e.g. 24 EA)
+  skuUom?: string; // SKU/base unit (e.g. EA, KG). unit price = lineValue / skuQty
+  netPriceCents?: number; // price per ORDER unit (per case), in cents
+  lineValueCents?: number; // orderQty * netPrice (= netValue), in cents
   currency: string;
 
   grQty?: number; // goods received

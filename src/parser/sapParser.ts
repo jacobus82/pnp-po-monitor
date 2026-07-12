@@ -3,6 +3,7 @@ import {
   columnReader,
   detectDelimiter,
   mapHeaders,
+  normalizeHeader,
   parseSapDate,
   parseSapNumber,
   splitLine,
@@ -188,6 +189,21 @@ export function parseSapFile(text: string, defaultCurrency = "ZAR"): ParseResult
   const idx = mapping.index;
   const col = columnReader(idx);
 
+  // Newer ALV exports add a SECOND "Quantity" column (total units in the article's
+  // SKU/base unit) plus a "SKU" unit code, next to the order Quantity + OPU:
+  //   ... Quantity  Quantity  OPU  SKU  Net price  Net Value ...
+  //   ...        3        24   CS   EA     224.80     674.40  ...
+  // orderQty (via the "quantity" synonym) claims the first Quantity column; the
+  // SKU quantity is the second one, paired with the "SKU" unit. Resolve them
+  // positionally, but only when a "SKU" header is present (old single-Quantity
+  // exports have no SKU column, so skuQty stays undefined and unit price falls
+  // back to per-order-unit downstream).
+  const normHdr = headerCols.map(normalizeHeader);
+  const skuUomIdx = normHdr.indexOf("sku");
+  const qtyCols = normHdr.reduce<number[]>((a, h, i) => (h === "quantity" ? (a.push(i), a) : a), []);
+  const skuQtyIdx =
+    skuUomIdx !== -1 ? qtyCols.find((i) => i !== idx["orderQty"]) ?? -1 : -1;
+
   const lines: ParsedPoLine[] = [];
   let skipped = 0;
 
@@ -212,6 +228,9 @@ export function parseSapFile(text: string, defaultCurrency = "ZAR"): ParseResult
     }
 
     const orderQty = parseSapNumber(col(cols, "orderQty"));
+    const skuQty = skuQtyIdx >= 0 ? parseSapNumber(cols[skuQtyIdx]) : undefined;
+    const skuUom =
+      skuUomIdx >= 0 ? cols[skuUomIdx]?.replace(/^"|"$/g, "").trim() || undefined : undefined;
     const grQty = parseSapNumber(col(cols, "grQty"));
     let openQty = parseSapNumber(col(cols, "openQty"));
     if (openQty == null && orderQty != null && grQty != null) {
@@ -250,6 +269,8 @@ export function parseSapFile(text: string, defaultCurrency = "ZAR"): ParseResult
       sloc: col(cols, "sloc"),
       orderQty,
       uom: col(cols, "uom"),
+      skuQty,
+      skuUom,
       netPriceCents,
       lineValueCents,
       currency: col(cols, "currency") ?? defaultCurrency,

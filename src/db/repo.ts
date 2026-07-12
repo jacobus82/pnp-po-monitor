@@ -151,10 +151,10 @@ export async function insertPoLine(
   const res = await env.DB.prepare(
     `INSERT INTO po_lines (
         upload_id, vendor_id, article_id, po_number, po_line_no, currency,
-        order_qty, uom, net_price_cents, line_value_cents,
+        order_qty, uom, sku_qty, sku_uom, net_price_cents, line_value_cents,
         gr_qty, open_qty, open_value_cents,
         order_date, delivery_date, line_status, raw_json
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   )
     .bind(
       uploadId,
@@ -165,6 +165,8 @@ export async function insertPoLine(
       line.currency,
       line.orderQty ?? null,
       line.uom ?? null,
+      line.skuQty ?? null,
+      line.skuUom ?? null,
       line.netPriceCents ?? null,
       line.lineValueCents ?? null,
       line.grQty ?? null,
@@ -284,10 +286,10 @@ export async function insertPoLinesBatch(
   const ins = env.DB.prepare(
     `INSERT INTO po_lines (
         upload_id, vendor_id, article_id, po_number, po_line_no, currency,
-        order_qty, uom, net_price_cents, line_value_cents,
+        order_qty, uom, sku_qty, sku_uom, net_price_cents, line_value_cents,
         gr_qty, open_qty, open_value_cents, open_invoice_cents,
         mdse_cat, sloc, order_date, delivery_date, line_status, raw_json
-     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
   );
   // Capture each new row id from the batch result's last_row_id (per statement),
   // so there is no need to read 1000s of rows back afterwards.
@@ -308,6 +310,8 @@ export async function insertPoLinesBatch(
           line.currency,
           line.orderQty ?? null,
           line.uom ?? null,
+          line.skuQty ?? null,
+          line.skuUom ?? null,
           line.netPriceCents ?? null,
           line.lineValueCents ?? null,
           line.grQty ?? null,

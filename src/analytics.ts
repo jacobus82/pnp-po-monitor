@@ -251,48 +251,109 @@ export async function handleVendorDetail(env: Env, code: string): Promise<Respon
 /** GET /api/articles — article analysis aggregate. */
 export async function handleArticles(req: Request, env: Env): Promise<Response> {
   const limit = Math.min(Number(new URL(req.url).searchParams.get("limit") ?? "500"), 2000);
+  // Unit price is derived, not stored: net_price_cents is per ORDER unit (per
+  // case), so the true per-unit price is Σ(net value) / Σ(SKU units) over the
+  // article's ordered (non-return) lines that carry a SKU quantity. Where no line
+  // has a SKU qty (older exports), fall back to the per-order-unit average, and
+  // flag price_basis so the UI labels it. Stored lines are never mutated.
   const rows = await env.DB.prepare(
     `SELECT a.article_code code, a.description, a.department dept,
-            SUM(${PURCH}) total_value, AVG(p.net_price_cents) avg_price, COUNT(*) order_count
+            SUM(${PURCH}) total_value,
+            AVG(p.net_price_cents) opu_price,
+            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.line_value_cents ELSE 0 END) sku_value,
+            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.sku_qty ELSE 0 END) sku_units,
+            MAX(p.sku_uom) sku_uom,
+            COUNT(*) order_count
      FROM po_lines p JOIN articles a ON a.id = p.article_id
      GROUP BY a.id ORDER BY total_value DESC LIMIT ?`,
   )
     .bind(limit)
-    .all();
-  return json({ articles: rows.results });
+    .all<Record<string, number | string | null>>();
+  const articles = (rows.results ?? []).map((r) => {
+    const units = Number(r.sku_units ?? 0);
+    const unitPriceCents = units > 0 ? Math.round(Number(r.sku_value ?? 0) / units) : null;
+    const orderUnitPriceCents = r.opu_price == null ? null : Math.round(Number(r.opu_price));
+    return {
+      code: r.code,
+      description: r.description,
+      dept: r.dept,
+      total_value: r.total_value,
+      order_count: r.order_count,
+      // avg_price = the displayed price: true per-SKU-unit where available, else
+      // the per-order-unit (per case) figure as a labelled fallback.
+      avg_price: unitPriceCents ?? orderUnitPriceCents,
+      unit_price_cents: unitPriceCents,
+      order_unit_price_cents: orderUnitPriceCents,
+      sku_uom: r.sku_uom ?? null,
+      price_basis: unitPriceCents != null ? "unit" : "order-unit",
+    };
+  });
+  return json({ articles });
 }
 
 /** GET /api/articles/:code — article detail (price history + lines). */
 export async function handleArticleDetail(env: Env, code: string): Promise<Response> {
-  const kpis = await env.DB.prepare(
+  // Derived per-unit price (see handleArticles). min/max are per-unit where SKU
+  // qty exists, else per order unit; net_price_cents is left untouched.
+  const kpisRow = await env.DB.prepare(
     `SELECT a.article_code code, a.description, a.department dept,
-            SUM(${PURCH}) total_value, AVG(p.net_price_cents) avg_price,
-            MIN(p.net_price_cents) min_price, MAX(p.net_price_cents) max_price, COUNT(*) order_count
+            SUM(${PURCH}) total_value, COUNT(*) order_count,
+            AVG(p.net_price_cents) opu_avg, MIN(p.net_price_cents) opu_min, MAX(p.net_price_cents) opu_max,
+            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.line_value_cents ELSE 0 END) sku_value,
+            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.sku_qty ELSE 0 END) sku_units,
+            MIN(CASE WHEN p.sku_qty > 0 THEN p.line_value_cents * 1.0 / p.sku_qty END) unit_min,
+            MAX(CASE WHEN p.sku_qty > 0 THEN p.line_value_cents * 1.0 / p.sku_qty END) unit_max,
+            MAX(p.sku_uom) sku_uom
      FROM po_lines p JOIN articles a ON a.id=p.article_id WHERE a.article_code = ? GROUP BY a.id`,
   )
     .bind(code)
-    .first();
-  if (!kpis) return json({ error: "Article not found", code }, 404);
+    .first<Record<string, number | string | null>>();
+  if (!kpisRow) return json({ error: "Article not found", code }, 404);
+  const units = Number(kpisRow.sku_units ?? 0);
+  const hasSku = units > 0;
+  const num = (v: unknown) => (v == null ? null : Math.round(Number(v)));
+  const kpis = {
+    code: kpisRow.code,
+    description: kpisRow.description,
+    dept: kpisRow.dept,
+    total_value: kpisRow.total_value,
+    order_count: kpisRow.order_count,
+    avg_price: hasSku ? Math.round(Number(kpisRow.sku_value ?? 0) / units) : num(kpisRow.opu_avg),
+    min_price: hasSku ? num(kpisRow.unit_min) : num(kpisRow.opu_min),
+    max_price: hasSku ? num(kpisRow.unit_max) : num(kpisRow.opu_max),
+    sku_uom: kpisRow.sku_uom ?? null,
+    price_basis: hasSku ? "unit" : "order-unit",
+  };
   // kpis gates the 404 first; the price history and line list are then independent.
   const [history, lines] = await Promise.all([
     env.DB.prepare(
-      `SELECT p.order_date, p.net_price_cents, v.vendor_code, v.name vendor
+      `SELECT p.order_date, p.net_price_cents, p.sku_qty, p.line_value_cents, p.sku_uom, v.vendor_code, v.name vendor
      FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.article_code = ? AND p.order_date IS NOT NULL AND p.net_price_cents IS NOT NULL
      ORDER BY p.order_date`,
     )
       .bind(code)
-      .all(),
+      .all<{ order_date: string; net_price_cents: number; sku_qty: number | null; line_value_cents: number | null; sku_uom: string | null; vendor_code: string | null; vendor: string | null }>(),
     env.DB.prepare(
       `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor, p.order_qty,
-            p.net_price_cents, p.line_value_cents, p.sloc
+            p.sku_qty, p.sku_uom, p.net_price_cents, p.line_value_cents, p.sloc
      FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.article_code = ? ORDER BY p.order_date DESC LIMIT 500`,
     )
       .bind(code)
       .all(),
   ]);
-  return json({ kpis, history: history.results, lines: lines.results });
+  // Per-line unit price: net value / SKU units where present, else the per-order
+  // -unit net price (labelled by unit_basis).
+  const historyOut = (history.results ?? []).map((h) => {
+    const hasQ = h.sku_qty != null && h.sku_qty > 0 && h.line_value_cents != null;
+    return {
+      ...h,
+      unit_price_cents: hasQ ? Math.round(Number(h.line_value_cents) / Number(h.sku_qty)) : h.net_price_cents,
+      unit_basis: hasQ ? "unit" : "order-unit",
+    };
+  });
+  return json({ kpis, history: historyOut, lines: lines.results });
 }
 
 /** GET /api/categories — merchandise-category aggregate. */
