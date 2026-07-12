@@ -1422,7 +1422,10 @@ PAGES.fy=function(){
   loading();
   Promise.all([api("/api/purchases/summary?groupBy=month"),api("/api/settings"),api("/api/gr/period?from=2000-01-01&to=2099-12-31"),api("/api/fim/period?from=2000-01-01&to=2099-12-31")]).then(function(res){
     var sum=res[0],sett=res[1].settings||{},gr=res[2],fim=res[3];var t=sum.totals||{};
-    var monthlyTarget=Number(sett.monthly_turnover_target||8000000);
+    // monthly_turnover_target is stored as a human-formatted string ("14 000 000"),
+    // so Number() on it directly is NaN (was rendering "RNaN"). Strip non-numeric
+    // separators before parsing; fall back to 8M if empty/unparseable.
+    var monthlyTarget=Number(String(sett.monthly_turnover_target||"").replace(/[^0-9.]/g,""))||8000000;
     var series=(sum.series||[]).map(function(s){return {label:s.label,short:s.key.slice(5),value:(s.purchases||0)/100}});
     // quarters (fiscal Q1 Mar-May...)
     var q={Q1:0,Q2:0,Q3:0,Q4:0};(sum.series||[]).forEach(function(s){var mo=Number(s.key.slice(5,7));var qq=(mo>=3&&mo<=5)?"Q1":(mo>=6&&mo<=8)?"Q2":(mo>=9&&mo<=11)?"Q3":"Q4";q[qq]+=s.purchases});

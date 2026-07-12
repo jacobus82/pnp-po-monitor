@@ -470,17 +470,25 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
   ).bind(...binds).first<Record<string, number>>();
 
   // GR-side scope (gr_date range only; gr_lines has no vendor and a different dept code).
-  const grWhere = [
-    "NOT EXISTS (SELECT 1 FROM po_lines p JOIN articles a ON a.id=p.article_id " +
-      "WHERE p.po_number=g.po_number AND a.article_code=g.article_code)",
-  ];
+  // "Unmatched" = the GR line's (po_number, article_code) has no PO line. This is
+  // expressed as a set-based anti-join against a materialized set of matched keys,
+  // NOT a per-row correlated NOT EXISTS: the correlated form re-ran a
+  // po_lines⋈articles lookup for every one of ~1M gr_lines rows and blew past D1's
+  // per-request CPU limit (~35s → 500). The CTE materializes the matched keys once
+  // and hash-anti-joins, cutting the two GR-side queries from ~35s to ~1s each with
+  // identical results.
+  const MATCHED_CTE =
+    "WITH matched(pn, ac) AS (" +
+    "SELECT DISTINCT p.po_number, a.article_code FROM po_lines p JOIN articles a ON a.id = p.article_id)";
+  const grFrom = "FROM gr_lines g LEFT JOIN matched m ON m.pn = g.po_number AND m.ac = g.article_code";
+  const grWhere = ["m.pn IS NULL"];
   const grBinds: unknown[] = [];
   if (from) { grWhere.push("g.gr_date >= ?"); grBinds.push(from); }
   if (to) { grWhere.push("g.gr_date <= ?"); grBinds.push(to); }
   const grScope = "WHERE " + grWhere.join(" AND ");
 
   const grCountRow = await env.DB.prepare(
-    `SELECT COUNT(*) n FROM (SELECT 1 FROM gr_lines g ${grScope} GROUP BY g.po_number, g.article_code)`,
+    `${MATCHED_CTE} SELECT COUNT(*) n FROM (SELECT 1 ${grFrom} ${grScope} GROUP BY g.po_number, g.article_code)`,
   ).bind(...grBinds).first<{ n: number }>();
 
   const totalOrdered = sum?.total_ordered_value ?? 0;
@@ -538,11 +546,12 @@ export async function handleReconciliation(req: Request, env: Env): Promise<Resp
 
   // GR received with no matching PO (always returned for the tab's second table).
   const grRows = await env.DB.prepare(
-    `SELECT g.po_number, g.article_code, g.article_desc, g.dept_code sap_dept_code,
+    `${MATCHED_CTE}
+     SELECT g.po_number, g.article_code, g.article_desc, g.dept_code sap_dept_code,
             SUM(COALESCE(g.qty,0)) received_qty, SUM(COALESCE(g.cost_zar,0)) received_value,
             MAX(g.gr_date) last_gr_date, COUNT(*) gr_count,
             CAST(julianday('now') - julianday(MAX(g.gr_date)) AS INTEGER) days_outstanding
-     FROM gr_lines g ${grScope}
+     ${grFrom} ${grScope}
      GROUP BY g.po_number, g.article_code
      ORDER BY received_value DESC LIMIT ?`,
   ).bind(...grBinds, limit).all<Record<string, number | string | null>>();
@@ -692,6 +701,17 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
   const to = q.get("to");
   if (!from || !to) return json({ error: "from and to (YYYY-MM-DD) are required." }, 400);
 
+  // Clamp the requested window to the actual FIM data span before it drives the
+  // RECURSIVE day generator in fimResolvedCte. Callers (the FY + FIM-analysis
+  // screens) pass "all data" as 2000-01-01→2099-12-31, which would generate
+  // ~36,525 day-rows for ~850 days of real data (~7s). Days outside the data
+  // span cover no rows, so clamping is result-identical but ~40x cheaper.
+  const bounds = await env.DB.prepare(
+    "SELECT MIN(date_from) mn, MAX(date_to) mx FROM fim_daily",
+  ).first<{ mn: string | null; mx: string | null }>();
+  const lo = bounds?.mn && from < bounds.mn ? bounds.mn : from;
+  const hi = bounds?.mx && to > bounds.mx ? bounds.mx : to;
+
   const rows = await env.DB.prepare(
     `${fimResolvedCte("WITH")}
      SELECT dept_code,
@@ -713,7 +733,7 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
      FROM fr
      GROUP BY dept_code`,
   )
-    .bind(from, to)
+    .bind(lo, hi)
     .all<Record<string, number | string | null>>();
 
   const guides = await env.DB.prepare(
