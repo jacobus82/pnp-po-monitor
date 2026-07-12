@@ -357,13 +357,23 @@ export async function handleArticleDetail(env: Env, code: string): Promise<Respo
 }
 
 /** GET /api/categories — merchandise-category aggregate. */
-export async function handleCategories(env: Env): Promise<Response> {
+export async function handleCategories(req: Request, env: Env): Promise<Response> {
+  // Category totals now scope to the selected period (were previously all history,
+  // with no picker on the screen).
+  const q = new URL(req.url).searchParams;
+  const where = ["p.mdse_cat IS NOT NULL", "p.mdse_cat != ''"];
+  const binds: unknown[] = [];
+  const from = q.get("from"), to = q.get("to");
+  if (from) { where.push("p.order_date >= ?"); binds.push(from); }
+  if (to) { where.push("p.order_date <= ?"); binds.push(to); }
   const rows = await env.DB.prepare(
     `SELECT p.mdse_cat code, substr(p.mdse_cat,1,3) dept,
             SUM(${PURCH}) purchases, SUM(COALESCE(p.open_value_cents,0)) open_deliver, COUNT(*) lines
-     FROM po_lines p WHERE p.mdse_cat IS NOT NULL AND p.mdse_cat != ''
+     FROM po_lines p WHERE ${where.join(" AND ")}
      GROUP BY p.mdse_cat ORDER BY purchases DESC`,
-  ).all();
+  )
+    .bind(...binds)
+    .all();
   return json({ categories: rows.results });
 }
 

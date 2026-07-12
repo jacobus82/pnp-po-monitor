@@ -1438,18 +1438,23 @@ PAGES.fy=function(){
   }).catch(errBox);
 };
 
-PAGES.vendors=function(){loading();api("/api/vendors").then(function(d){
-  var rows=d.vendors||[];
-  setHTML('<div class="card"><h2>Vendor analysis ('+rows.length+') \\u2014 sorted by net spend</h2>'+makeTable([
-    {key:"code",label:"Vendor"},
-    {key:"name",label:"Name",html:function(r){return esc(r.name||"")+((r.purchases>0&&r.returns/r.purchases>0.05)?' <span class="neg small" title="Returns exceed 5% of gross orders">high returns</span>':"")}},
-    {key:"purchases",label:"Gross",num:true,fmt:R},
-    {key:"returns",label:"Returns",num:true,html:function(r){return '<span style="color:var(--red)">'+(r.returns>0?'-'+R(r.returns):R(0))+'</span>'}},
-    {key:"net",label:"Net",num:true,html:function(r){return '<b style="color:var(--nav)">'+R(r.net)+'</b>'}},
-    {key:"open_deliver",label:"Open deliver",num:true,fmt:R},
-    {key:"open_invoice",label:"Open invoice",num:true,fmt:R},{key:"po_count",label:"POs",num:true},{key:"lines",label:"Lines",num:true}
-  ],rows,{onRow:function(r){openVendor(r.code)},cards:true})+'</div>');
-}).catch(errBox)};
+PAGES.vendors=function(){
+  setHTML(periodPickerHTML("vperiod")+'<div id="vbody"><div class="loading">Loading\\u2026</div></div>');
+  function load(from,to){$("vbody").innerHTML='<div class="loading">Loading\\u2026</div>';
+    api("/api/vendors?from="+from+"&to="+to).then(function(d){
+      var rows=d.vendors||[];
+      $("vbody").innerHTML='<div class="card"><h2>Vendor analysis ('+rows.length+') \\u2014 sorted by net spend</h2>'+makeTable([
+        {key:"code",label:"Vendor"},
+        {key:"name",label:"Name",html:function(r){return esc(r.name||"")+((r.purchases>0&&r.returns/r.purchases>0.05)?' <span class="neg small" title="Returns exceed 5% of gross orders">high returns</span>':"")}},
+        {key:"purchases",label:"Gross",num:true,fmt:R},
+        {key:"returns",label:"Returns",num:true,html:function(r){return '<span style="color:var(--red)">'+(r.returns>0?'-'+R(r.returns):R(0))+'</span>'}},
+        {key:"net",label:"Net",num:true,html:function(r){return '<b style="color:var(--nav)">'+R(r.net)+'</b>'}},
+        {key:"open_deliver",label:"Open deliver",num:true,fmt:R},
+        {key:"open_invoice",label:"Open invoice",num:true,fmt:R},{key:"po_count",label:"POs",num:true},{key:"lines",label:"Lines",num:true}
+      ],rows,{onRow:function(r){openVendor(r.code)},cards:true})+'</div>';
+    }).catch(function(e){$("vbody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});}
+  initPeriodPicker("vperiod",load,"month");
+};
 
 PAGES.articles=function(){loading();api("/api/articles?limit=1000").then(function(d){
   var rows=d.articles||[];
@@ -1459,13 +1464,18 @@ PAGES.articles=function(){loading();api("/api/articles?limit=1000").then(functio
   ],rows,{onRow:function(r){openArticle(r.code)}})+'</div>');
 }).catch(errBox)};
 
-PAGES.categories=function(){loading();api("/api/categories").then(function(d){
-  var rows=d.categories||[];
-  setHTML('<div class="card"><h2>Category analysis ('+rows.length+')</h2>'+makeTable([
-    {key:"code",label:"Category"},{key:"dept",label:"Dept",mobileHide:true},
-    {key:"purchases",label:"Purchases",num:true,fmt:R},{key:"open_deliver",label:"Open deliver",num:true,fmt:R},{key:"lines",label:"Lines",num:true}
-  ],rows,{rowMenu:false,onRow:function(r){openCategory(r.code)}})+'</div>');
-}).catch(errBox)};
+PAGES.categories=function(){
+  setHTML(periodPickerHTML("cperiod")+'<div id="cbody"><div class="loading">Loading\\u2026</div></div>');
+  function load(from,to){$("cbody").innerHTML='<div class="loading">Loading\\u2026</div>';
+    api("/api/categories?from="+from+"&to="+to).then(function(d){
+      var rows=d.categories||[];
+      $("cbody").innerHTML='<div class="card"><h2>Category analysis ('+rows.length+') <span class="muted small">purchases in selected period</span></h2>'+makeTable([
+        {key:"code",label:"Category"},{key:"dept",label:"Dept",mobileHide:true},
+        {key:"purchases",label:"Purchases",num:true,fmt:R},{key:"open_deliver",label:"Open deliver",num:true,fmt:R},{key:"lines",label:"Lines",num:true}
+      ],rows,{rowMenu:false,onRow:function(r){openCategory(r.code)}})+'</div>';
+    }).catch(function(e){$("cbody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});}
+  initPeriodPicker("cperiod",load,"month");
+};
 function openCategory(code){openModal("Category "+esc(code),'<div class="loading">Loading\\u2026</div>');
   api("/api/categories/"+encodeURIComponent(code)).then(function(d){
     openModal("Category "+esc(code),makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"vendor",label:"Vendor"},{key:"article_code",label:"Article"},{key:"description",label:"Description"},{key:"order_qty",label:"Qty",num:true},{key:"line_value_cents",label:"Value",num:true,fmt:R}],d.lines||[],{}));
@@ -1810,10 +1820,10 @@ PAGES.period=function(){loading();api("/api/fim/by-period").then(function(d){
 }).catch(errBox)};
 
 function fimAnalysis(toolbarId,bodyId,render){
-  setHTML(fimPeriodToolbar(toolbarId)+'<div id="'+bodyId+'"><div class="loading">Loading\\u2026</div></div>');
-  function load(p){var rng=periodRange(p);$(toolbarId+"r").innerHTML=esc(rng[0])+' <span class="muted">\\u2192</span> '+esc(rng[1]);
-    api("/api/fim/period?from="+rng[0]+"&to="+rng[1]).then(function(d){render($(bodyId),d.departments||[])}).catch(function(e){$(bodyId).innerHTML='<div class="err">'+esc(e.message)+'</div>'});}
-  $(toolbarId).onchange=function(){load(this.value)};load("all");
+  setHTML(periodPickerHTML(toolbarId)+'<div id="'+bodyId+'"><div class="loading">Loading\\u2026</div></div>');
+  function load(from,to){$(bodyId).innerHTML='<div class="loading">Loading\\u2026</div>';
+    api("/api/fim/period?from="+from+"&to="+to).then(function(d){render($(bodyId),d.departments||[])}).catch(function(e){$(bodyId).innerHTML='<div class="err">'+esc(e.message)+'</div>'});}
+  initPeriodPicker(toolbarId,load,"month");
 }
 
 PAGES.stock=function(){fimAnalysis("stperiod","stbody",function(el,deps){

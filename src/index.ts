@@ -2281,7 +2281,7 @@ export default {
       if (path === "/api/articles" && m === "GET") return await handleArticles(req, env);
       const articleDetail = path.match(/^\/api\/articles\/([^/]+)$/);
       if (articleDetail && m === "GET") return await handleArticleDetail(env, decodeURIComponent(articleDetail[1]!));
-      if (path === "/api/categories" && m === "GET") return await handleCategories(env);
+      if (path === "/api/categories" && m === "GET") return await handleCategories(req, env);
       const categoryDetail = path.match(/^\/api\/categories\/([^/]+)$/);
       if (categoryDetail && m === "GET") return await handleCategoryDetail(env, decodeURIComponent(categoryDetail[1]!));
       if (path === "/api/departments-po" && m === "GET") return await handleDepartmentsPo(req, env);
