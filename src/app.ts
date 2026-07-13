@@ -2103,8 +2103,9 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
     +f("fy_start_month","FY start month","3 = March")
     +f("vencor_terms_days","Vencor payment terms","days (14)")
     +f("pnp_terms_days","PnP Corporate payment terms","days after week-end (28)")
+    +f("open_po_max_age_days","Auto-close open POs after","days (default 90 \\u2014 older open lines drop off Open/Committed)")
     +'<div style="margin-top:10px"><button class="btn" onclick="saveSettings()">Save settings</button> <span id="set_msg" class="small muted"></span></div></div>';
-  window._setKeys=["monthly_turnover_target","target_gp_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days"];
+  window._setKeys=["monthly_turnover_target","target_gp_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days"];
   var gl='<div class="card" style="margin-top:14px"><h2>Department guideline margins</h2>'+makeTable([
     {key:"dept_code",label:"Dept"},{key:"dept_name",label:"Name"},{key:"dept_group",label:"Group"},
     {key:"guideline_margin_pct",label:"Guideline %",num:true,html:function(r){return '<input class="inp" style="width:80px;text-align:right" value="'+r.guideline_margin_pct+'" onchange="saveGuideline(\\''+r.dept_code+'\\',this.value)">'}},

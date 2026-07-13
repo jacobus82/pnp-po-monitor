@@ -23,6 +23,8 @@ import {
   markUploadError,
   markUploadParsed,
   committedOpenValueCents,
+  openPoMaxAgeDays,
+  notAgedOutSql,
   type InsertedLine,
 } from "./db/repo";
 import {
@@ -1746,8 +1748,12 @@ async function buildMarginPerformance(
 /** GET /api/dashboard — one-call aggregate powering the HTML dashboard. */
 async function handleDashboard(env: Env): Promise<Response> {
   const t = thresholds(env);
+  // Aged-out open PO lines (older than open_po_max_age_days) are treated as
+  // auto-closed: excluded from Open/Committed tiles but never mutated.
+  const maxAge = await openPoMaxAgeDays(env);
+  const notAged = notAgedOutSql(maxAge);
 
-  // line totals by status
+  // line totals by status (raw breakdown; the Open tiles below apply the age cap)
   const byStatus = await env.DB.prepare(
     `SELECT line_status, COUNT(*) AS n,
             COALESCE(SUM(open_value_cents),0) AS open_value_cents,
@@ -1757,11 +1763,12 @@ async function handleDashboard(env: Env): Promise<Response> {
 
   // Reconciliation-based outstanding commitment: PO value ordered minus GR value
   // received (matches the PO Reconciliation tab). received_value is in Rand.
+  // Aged-out open lines drop out of the netting via notAged.
   const recon = await env.DB.prepare(
     `SELECT COALESCE(SUM(line_value_cents),0) AS ordered_cents,
             COALESCE(SUM(received_value),0)   AS received_zar,
             SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) AS outstanding_lines
-     FROM po_lines`,
+     FROM po_lines WHERE ${notAged}`,
   ).first<{ ordered_cents: number; received_zar: number; outstanding_lines: number }>();
   const outstandingValueCents = Math.max(
     0,
@@ -1769,12 +1776,13 @@ async function handleDashboard(env: Env): Promise<Response> {
   );
   const outstandingLines = recon?.outstanding_lines ?? 0;
 
-  const openValueCents = (byStatus.results ?? [])
-    .filter((r) => r.line_status !== "closed")
-    .reduce((s, r) => s + r.open_value_cents, 0);
-  const openLines = (byStatus.results ?? [])
-    .filter((r) => r.line_status !== "closed")
-    .reduce((s, r) => s + r.n, 0);
+  // Open value/lines: non-closed lines within the age cap.
+  const openRow = await env.DB.prepare(
+    `SELECT COALESCE(SUM(open_value_cents),0) AS open_value_cents, COUNT(*) AS n
+     FROM po_lines WHERE line_status != 'closed' AND ${notAged}`,
+  ).first<{ open_value_cents: number; n: number }>();
+  const openValueCents = openRow?.open_value_cents ?? 0;
+  const openLines = openRow?.n ?? 0;
 
   // Open-order aging buckets. The SAP PO export carries no delivery date, so
   // aging is measured from COALESCE(last_gr_date, order_date) per the reconciliation

@@ -788,13 +788,45 @@ export async function fimWeekCompleteDepts(
   return complete;
 }
 
+/** Default max age (days) before an open PO line is treated as auto-closed. */
+export const DEFAULT_OPEN_PO_MAX_AGE_DAYS = 90;
+
+/**
+ * Auto-close threshold: open PO lines older than this many days (from order_date)
+ * are treated as closed — excluded from Open/Committed tiles, invoice-to-deliver
+ * views and stale flags — without mutating the rows. Configurable via
+ * app_settings.open_po_max_age_days; falls back to 90.
+ */
+export async function openPoMaxAgeDays(env: Env): Promise<number> {
+  const r = await env.DB.prepare(
+    `SELECT value FROM app_settings WHERE key='open_po_max_age_days'`,
+  ).first<{ value: string }>();
+  const n = Math.floor(Number(r?.value));
+  return Number.isFinite(n) && n > 0 ? n : DEFAULT_OPEN_PO_MAX_AGE_DAYS;
+}
+
+/**
+ * SQL predicate that is FALSE only for aged-out OPEN PO lines (undelivered and
+ * older than the max age), TRUE for everything else — so it can be dropped into
+ * any query without disturbing fully-received lines. The integer max-age is
+ * inlined (validated integer — injection-safe). `prefix` is the table alias
+ * (e.g. "p") when po_lines is aliased; omit for an unqualified query.
+ */
+export function notAgedOutSql(maxAgeDays: number, prefix = ""): string {
+  const d = Math.max(1, Math.floor(maxAgeDays));
+  const p = prefix ? prefix + "." : "";
+  return `NOT (${p}is_fully_received = 0 AND ${p}order_date IS NOT NULL AND julianday('now') - julianday(${p}order_date) > ${d})`;
+}
+
 /** Committed (open) value in cents, optionally scoped to a department or vendor. */
 export async function committedOpenValueCents(
   env: Env,
   scopeType: "overall" | "department" | "vendor",
   scopeRef: string | null,
 ): Promise<number> {
-  let sql = `SELECT COALESCE(SUM(open_value_cents),0) AS total FROM po_lines WHERE line_status != 'closed'`;
+  const maxAge = await openPoMaxAgeDays(env);
+  let sql = `SELECT COALESCE(SUM(open_value_cents),0) AS total FROM po_lines
+             WHERE line_status != 'closed' AND ${notAgedOutSql(maxAge)}`;
   const binds: unknown[] = [];
   if (scopeType === "department" && scopeRef) {
     sql += ` AND article_id IN (SELECT id FROM articles WHERE department = ?)`;

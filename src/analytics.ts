@@ -1,4 +1,5 @@
 import { type Env, thresholds, budgetStatus } from "./config";
+import { openPoMaxAgeDays, notAgedOutSql } from "./db/repo";
 import { fiscalCalendar } from "./fiscal";
 import { guidelineKeyForDept } from "./guidelines";
 import { resolveDeptName } from "./departments";
@@ -475,6 +476,7 @@ export async function handleOpenOrders(req: Request, env: Env): Promise<Response
   const q = new URL(req.url).searchParams;
   const filter = q.get("filter") ?? "both";
   const limit = Math.min(Number(q.get("limit") ?? "1000"), 5000);
+  const notAged = notAgedOutSql(await openPoMaxAgeDays(env), "p"); // auto-close aged open POs
   let cond = "(COALESCE(p.open_value_cents,0) > 0 OR COALESCE(p.open_invoice_cents,0) > 0)";
   if (filter === "deliver") cond = "COALESCE(p.open_value_cents,0) > 0";
   else if (filter === "invoice") cond = "COALESCE(p.open_invoice_cents,0) > 0";
@@ -486,7 +488,7 @@ export async function handleOpenOrders(req: Request, env: Env): Promise<Response
             p.line_value_cents, p.open_value_cents, p.open_invoice_cents, p.last_gr_date,
             CAST(julianday('now') - julianday(COALESCE(p.last_gr_date, p.order_date)) AS INTEGER) days_outstanding
      FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
-     WHERE p.is_fully_received = 0 AND ${cond}
+     WHERE p.is_fully_received = 0 AND ${notAged} AND ${cond}
      ORDER BY days_outstanding DESC LIMIT ?`,
   )
     .bind(limit)
@@ -1724,6 +1726,7 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
   const q = new URL(req.url).searchParams;
   const { key, from, to, label } = await resolvePeriod(env, q.get("period"), q.get("from"), q.get("to"));
   const t = thresholds(env);
+  const notAged = notAgedOutSql(await openPoMaxAgeDays(env)); // auto-close aged open POs
 
   // Eight independent reads once the period is resolved — the PO gross/returns/net
   // split, GR actual, the weekly cap, the fiscal weeks overlapping the period, the
@@ -1747,7 +1750,7 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
     env.DB.prepare(
       `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar,
             SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) lines FROM po_lines
-     WHERE COALESCE(sloc,'') != 'S002'`,
+     WHERE COALESCE(sloc,'') != 'S002' AND ${notAged}`,
     ).first<{ ordered_cents: number; received_zar: number; lines: number }>(),
     salesWindowsCents(env),
     prevCompleteFimWeek(env),
@@ -2209,6 +2212,7 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
   const dept = q.get("dept");
   const limit = Math.min(Number(q.get("limit") ?? "200"), 1000);
   const offset = Math.max(Number(q.get("offset") ?? "0"), 0);
+  const notAged = notAgedOutSql(await openPoMaxAgeDays(env)); // auto-close aged open POs
 
   // Base scope = period + vendor + dept (drives the gross/returns/net summary
   // cards). The status filter is layered on top only for the line LIST.
@@ -2257,7 +2261,7 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
     // (ordered minus received across all S001 lines); returns (S002) excluded.
     env.DB.prepare(
       `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar
-     FROM po_lines WHERE COALESCE(sloc,'') != 'S002'`,
+     FROM po_lines WHERE COALESCE(sloc,'') != 'S002' AND ${notAged}`,
     ).first<{ ordered_cents: number; received_zar: number }>(),
     env.DB.prepare(
       `SELECT v.vendor_code code, v.name, COUNT(*) lines, COALESCE(SUM(p.line_value_cents),0) ret_cents
