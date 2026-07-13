@@ -943,12 +943,29 @@ export async function handleFimByPeriod(env: Env): Promise<Response> {
   )
     .bind(span.lo, span.hi)
     .all<Record<string, number | string | null>>();
+  // Full fiscal-calendar date range each period covers (all weeks, not just
+  // weeks with data) — for the "P01 · 01.03.2026–29.03.2026" label.
+  const codes = (rows.results ?? []).map((r) => String(r.period)).filter(Boolean);
+  const bounds = new Map<string, { start: string | null; end: string | null }>();
+  if (codes.length) {
+    const ph = codes.map(() => "?").join(",");
+    const b = await env.DB.prepare(
+      `SELECT fiscal_period_code code, MIN(week_start) start, MAX(week_end) end
+       FROM fiscal_weeks WHERE fiscal_period_code IN (${ph}) GROUP BY fiscal_period_code`,
+    )
+      .bind(...codes)
+      .all<{ code: string; start: string | null; end: string | null }>();
+    for (const r of b.results ?? []) bounds.set(r.code, { start: r.start, end: r.end });
+  }
   const r2 = (n: unknown) => (n == null ? null : Math.round(Number(n) * 100) / 100);
   const periods = (rows.results ?? []).map((r) => {
     const sales = Number(r.sales ?? 0);
     const cos = Number(r.cos ?? 0);
+    const bd = bounds.get(String(r.period));
     return {
       period: r.period,
+      periodStart: bd?.start ?? null,
+      periodEnd: bd?.end ?? null,
       quarter: r.quarter,
       fiscalYear: Number(r.fy),
       salesZar: r2(r.sales),

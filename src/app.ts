@@ -423,6 +423,7 @@ function R(c){return "R"+(c==null?0:c/100).toLocaleString("en-ZA",{minimumFracti
 function R0(c){return "R"+Math.round((c==null?0:c)/100).toLocaleString("en-ZA")}
 function Rr(r){return "R"+(r==null?0:r).toLocaleString("en-ZA",{minimumFractionDigits:2,maximumFractionDigits:2})}
 function pct(v){return v==null?"\\u2014":(Math.round(v*10)/10)+"%"}
+function dmy(iso){if(!iso)return "";var p=String(iso).slice(0,10).split("-");return p.length<3?esc(iso):p[2]+"."+p[1]+"."+p[0]}
 function num(n){return (n==null?0:n).toLocaleString("en-ZA")}
 function api(path){return fetch(path,{cache:"no-store"}).then(function(r){if(!r.ok)return r.json().then(function(j){throw new Error(j.error||("HTTP "+r.status))});return r.json()})}
 // Admin token for destructive routes (X-Admin-Token). Stored once in localStorage;
@@ -508,6 +509,7 @@ function colChart(series,opts){
     var col=series[i].color||"#2E6CA8";
     bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0,h).toFixed(1)+'" fill="'+col+'" rx="2"><title>'+esc(series[i].label)+": "+R0(series[i].value)+'</title></rect>';
     if(n<=16)labels+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-pad+12)+'" font-size="9" text-anchor="middle" fill="#6a7480">'+esc(series[i].short||series[i].label)+'</text>';
+    if(opts.valueLabels&&n<=16)labels+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+Math.max(9,y-3).toFixed(1)+'" font-size="8.5" text-anchor="middle" fill="#3a4550">'+esc((opts.valueFmt||R0)(series[i].value))+'</text>';
   }
   var bl="";
   if(opts.budget){var by=H-pad-(opts.budget/max)*(H-pad*2);bl='<line x1="'+pad+'" y1="'+by.toFixed(1)+'" x2="'+(W-pad)+'" y2="'+by.toFixed(1)+'" stroke="#BE1D37" stroke-width="1.5" stroke-dasharray="5 4"/><text x="'+(W-pad)+'" y="'+(by-4).toFixed(1)+'" font-size="9" text-anchor="end" fill="#BE1D37">budget</text>'}
@@ -1808,16 +1810,23 @@ function fimPeriodToolbar(id){return '<div class="toolbar"><label class="small m
 PAGES.period=function(){loading();api("/api/fim/by-period").then(function(d){
   var p=d.periods||[];
   if(!p.length){setHTML('<div class="card"><div class="muted">No FIM data yet. Load FIM reports to see fiscal-period analysis.</div></div>');return}
-  var series=p.map(function(x){return {label:x.period,short:x.period.slice(-3),value:x.salesZar||0}});
-  var h='<div class="card"><h2>Net sales by fiscal period (4-4-5)</h2>'+colChart(series,{})+'</div>';
+  // Chart: net sales per period, period code on the axis and the figure above each bar.
+  var series=p.map(function(x){return {label:periodLabel(x),short:String(x.period).slice(-3),value:x.salesZar||0}});
+  var h='<div class="card"><h2>Net sales by fiscal period (4-4-5)</h2>'+colChart(series,{valueLabels:true,valueFmt:Rr0})+'</div>';
+  // %-of-sales appended inline (muted, no new column) next to Waste and Shrink.
+  function pctOfSales(v,r){var s=r.salesZar||0;if(!s||v==null)return "";return ' <span class="muted small">('+(Math.round(v/s*1000)/10)+'%)</span>'}
   h+='<div class="card" style="margin-top:14px"><h2>Period detail</h2>'+makeTable([
-    {key:"period",label:"Period"},{key:"quarter",label:"Quarter"},
+    {key:"period",label:"Period",html:function(r){return '<div>'+esc(r.period)+'</div>'+(r.periodStart&&r.periodEnd?'<div class="muted small">'+dmy(r.periodStart)+'\\u2013'+dmy(r.periodEnd)+'</div>':'')}},
+    {key:"quarter",label:"Quarter"},
     {key:"salesZar",label:"Net sales",num:true,fmt:Rr},{key:"marginPct",label:"Margin",num:true,fmt:function(v){return pct(v)}},
-    {key:"wasteZar",label:"Waste",num:true,fmt:Rr},{key:"shrinkZar",label:"Shrink",num:true,fmt:Rr},
+    {key:"wasteZar",label:"Waste",num:true,html:function(r){return Rr(r.wasteZar)+pctOfSales(r.wasteZar,r)}},
+    {key:"shrinkZar",label:"Shrink",num:true,html:function(r){return Rr(r.shrinkZar)+pctOfSales(r.shrinkZar,r)}},
     {key:"purchasesZar",label:"Purchases",num:true,fmt:Rr},{key:"days",label:"Days",num:true}
   ],p,{search:false,rowMenu:false})+'</div>';
   setHTML(h);
 }).catch(errBox)};
+// "2026P01 · 01.03.2026–29.03.2026" for chart tooltips.
+function periodLabel(x){var c=esc(x.period);return x.periodStart&&x.periodEnd?c+" \\u00b7 "+dmy(x.periodStart)+"\\u2013"+dmy(x.periodEnd):c}
 
 function fimAnalysis(toolbarId,bodyId,render){
   setHTML(periodPickerHTML(toolbarId)+'<div id="'+bodyId+'"><div class="loading">Loading\\u2026</div></div>');
