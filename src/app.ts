@@ -1589,22 +1589,29 @@ PAGES.customers=function(){
 // ---- Fan Score / NPS page ---------------------------------------------------
 function fsNpsColor(v){if(v==null)return "var(--muted)";if(v>=50)return "#2E7D32";if(v>=0)return "#d97706";return "#BE1D37"}
 function fsClassTag(c){if(!c)return '<span class="muted">\\u2014</span>';var col=c==="promoter"?"#2E7D32":c==="detractor"?"#BE1D37":"#d97706";return '<span style="color:'+col+';font-weight:600">'+esc(c.charAt(0).toUpperCase()+c.slice(1))+'</span>'}
-// NPS trend line (last 6 weeks); handles negative NPS with a zero baseline.
-function fsTrendChart(weeks){
+// NPS trend line (rolling 6 weeks ending at the selected week). Draws a horizontal
+// target line (default 90%), scales the domain to include it so pass/fail reads at a
+// glance, and labels each point with its score value.
+function fsTrendChart(weeks,target){
+  if(target==null)target=90;
   var pts=(weeks||[]).slice(-6).map(function(w){return {label:w.weekEnding,value:(w.npsTw!=null?w.npsTw:w.npsComputed)}}).filter(function(p){return p.value!=null});
   if(pts.length<2)return '<div class="muted small">Not enough weeks for a trend.</div>';
-  var W=760,H=220,pad=44,n=pts.length;
+  var W=760,H=240,pad=44,n=pts.length;
   var vs=pts.map(function(p){return p.value});
   var mn=Math.min.apply(null,vs),mx=Math.max.apply(null,vs);
+  if(target!=null){mn=Math.min(mn,target);mx=Math.max(mx,target);}
   mn=Math.min(mn,0);if(mx<=mn)mx=mn+1;
+  var span=(mx-mn)||1;mn-=span*0.10;mx+=span*0.14; // headroom for point labels
   function X(i){return pad+(n<=1?(W-2*pad)/2:i*(W-2*pad)/(n-1))}
   function Y(v){return H-pad-((v-mn)/(mx-mn))*(H-2*pad)}
   var line='<polyline points="'+pts.map(function(p,i){return X(i).toFixed(1)+","+Y(p.value).toFixed(1)}).join(" ")+'" fill="none" stroke="#2E6CA8" stroke-width="2"/>';
-  var dots=pts.map(function(p,i){return '<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(p.value).toFixed(1)+'" r="3" fill="'+fsNpsColor(p.value)+'"><title>'+esc(p.label)+": "+p.value.toFixed(2)+'%</title></circle>'}).join("");
+  var dots=pts.map(function(p,i){return '<circle cx="'+X(i).toFixed(1)+'" cy="'+Y(p.value).toFixed(1)+'" r="3.5" fill="'+fsNpsColor(p.value)+'"><title>'+esc(p.label)+": "+p.value.toFixed(2)+'%</title></circle>'}).join("");
+  var vlabs=pts.map(function(p,i){return '<text x="'+X(i).toFixed(1)+'" y="'+Math.max(12,Y(p.value)-8).toFixed(1)+'" font-size="10" font-weight="700" text-anchor="middle" fill="'+fsNpsColor(p.value)+'">'+p.value.toFixed(1)+'%</text>'}).join("");
   var zero=(mn<0&&mx>0)?'<line x1="'+pad+'" y1="'+Y(0).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+Y(0).toFixed(1)+'" stroke="#e2e7ec" stroke-dasharray="3 3"/>':"";
+  var tgt='<line x1="'+pad+'" y1="'+Y(target).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+Y(target).toFixed(1)+'" stroke="#2E7D32" stroke-width="1.5" stroke-dasharray="6 4"/><text x="'+(W-pad)+'" y="'+(Y(target)-5).toFixed(1)+'" font-size="10" font-weight="600" text-anchor="end" fill="#2E7D32">target '+target+'%</text>';
   var xlabs=pts.map(function(p,i){return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="10" fill="#6a7480" text-anchor="middle">'+esc(shortDate(p.label))+'</text>'}).join("");
   var yax='<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+mx.toFixed(0)+'%</text><text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">'+mn.toFixed(0)+'%</text>';
-  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+zero+line+dots+yax+xlabs+'</svg></div>';
+  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+zero+tgt+line+dots+vlabs+yax+xlabs+'</svg></div>';
 }
 // Promoters / Passives / Detractors as vertically-stacked bars (count + % of scored).
 function fsBreakdown(sm){
@@ -1614,32 +1621,38 @@ function fsBreakdown(sm){
 }
 function fsRenderResponses(d){
   var card=$("fsRespCard");if(!card)return;
-  if(!d||!d.hasData){card.innerHTML='<h2>Responses</h2><div class="muted small">No responses for this week.</div>';return;}
-  var sel='<select class="sel" id="fsWeek">'+(d.weeks||[]).map(function(w){return '<option value="'+w+'"'+(w===d.weekEnding?" selected":"")+'>W/E '+esc(w)+'</option>'}).join("")+'</select>';
-  card.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><h2 style="margin:0">Responses \\u00b7 W/E '+esc(d.weekEnding)+'</h2>'+sel+'</div>'
+  if(!d||!d.hasData){card.innerHTML='<h2>Responses \\u00b7 W/E '+esc((d&&d.weekEnding)||"")+'</h2><div class="muted small">No responses for this week.</div>';return;}
+  card.innerHTML='<h2>Responses \\u00b7 W/E '+esc(d.weekEnding)+'</h2>'
     +'<div style="margin-top:8px">'+makeTable([
       {key:"score",label:"Score",num:true,html:function(r){return r.score==null?"\\u2014":String(r.score)}},
       {key:"classification",label:"Class",html:function(r){return fsClassTag(r.classification)}},
       {key:"reason",label:"Reason for the score",cls:"desc",html:function(r){return esc(r.reason||"")}}
     ],d.responses||[],{cards:true,rowMenu:false})+'</div>';
-  var wk=$("fsWeek");if(wk)wk.onchange=function(){api("/api/fan-score/responses?week="+encodeURIComponent(this.value)).then(fsRenderResponses).catch(errBox);};
 }
-PAGES.fanscore=function(){
-  loading();
+// Selected week (week_ending) driving the whole Fan Score page; null = latest.
+var _fsWeek=null;
+PAGES.fanscore=function(){loading();fsLoad(_fsWeek);};
+function fsLoad(week){
+  var qs=week?("?week="+encodeURIComponent(week)):"";
   Promise.all([
-    api("/api/fan-score/summary"),
-    api("/api/fan-score/history"),
-    api("/api/fan-score/responses"),
+    api("/api/fan-score/summary"+qs),
+    api("/api/fan-score/history"+qs),
+    api("/api/fan-score/responses"+qs),
     api("/api/customer-counts/summary")
   ]).then(function(res){
     var sm=res[0]||{},hist=(res[1]&&res[1].weeks)||[],resp=res[2]||{},cc=res[3]||{};
     if(!sm.hasData&&!(resp&&resp.hasData)){setHTML('<div class="card"><h2>\\u2B50 Fan Score / NPS</h2><div class="muted small" style="padding:8px">No fan-score data \\u2014 upload a Fan Score report to get started.</div></div>');return;}
+    _fsWeek=sm.weekEnding||week||null;
     var tw=sm.npsTw!=null?sm.npsTw:sm.npsComputed;
     var delta=(sm.npsTw!=null&&sm.npsLw!=null)?(sm.npsTw-sm.npsLw):null;
     var vs=hist.map(function(w){return w.npsTw!=null?w.npsTw:w.npsComputed}).filter(function(v){return v!=null});
     var avg=vs.length?vs.reduce(function(a,b){return a+b},0)/vs.length:null;
     var wtdCust=(cc&&cc.hasData&&cc.windows&&cc.windows.wtd)?cc.windows.wtd.customersTy:null;
-    var h='<div class="cards kpis">'
+    // Week selector (full list, newest first) — drives the whole page.
+    var allWeeks=(resp&&resp.weeks&&resp.weeks.length)?resp.weeks:hist.map(function(w){return w.weekEnding}).slice().reverse();
+    var sel='<select class="sel" id="fsWeekTop">'+allWeeks.map(function(w){return '<option value="'+esc(w)+'"'+(w===_fsWeek?" selected":"")+'>W/E '+esc(w)+'</option>'}).join("")+'</select>';
+    var h='<div class="toolbar" style="justify-content:space-between"><div><span class="small muted">Week ending</span> '+sel+'</div><span class="small muted">6-week trend ends at the selected week</span></div>';
+    h+='<div class="cards kpis" style="margin-top:8px">'
       +kpi("NPS this week",'<span style="color:'+fsNpsColor(tw)+'">'+(tw!=null?tw.toFixed(2)+"%":"\\u2014")+'</span>',delta!=null?((delta>=0?"+":"")+delta.toFixed(2)+"pp vs LW"):null)
       +kpi("NPS last week",sm.npsLw!=null?sm.npsLw.toFixed(2)+"%":"\\u2014",null)
       +kpi("8-week avg NPS",avg!=null?avg.toFixed(1)+"%":"\\u2014",(vs.length+" weeks"))
@@ -1647,7 +1660,7 @@ PAGES.fanscore=function(){
       +kpi("Promoters / Detractors",'<span style="color:#2E7D32">'+num(sm.promoters)+'</span> / <span style="color:#BE1D37">'+num(sm.detractors)+'</span>',(sm.passives!=null?sm.passives+" passive":null))
       +kpi("Customers WTD",wtdCust!=null?num(wtdCust):"\\u2014","week to date")
       +'</div>';
-    h+='<div class="card" style="margin-top:12px"><h2>NPS trend (last 6 weeks)</h2>'+fsTrendChart(hist)+'</div>';
+    h+='<div class="card" style="margin-top:12px"><h2>NPS trend \\u00b7 6 weeks to W/E '+esc(_fsWeek||"")+'</h2>'+fsTrendChart(hist,90)+'</div>';
     h+='<div class="card" style="margin-top:12px"><h2>Response breakdown \\u00b7 W/E '+esc(sm.weekEnding||"")+'</h2>'+fsBreakdown(sm)+'</div>';
     h+='<div class="card" style="margin-top:12px"><h2>Weekly history</h2><div class="tablewrap"><table><thead><tr><th>Week ending</th><th class="num">NPS</th><th class="num">vs LW</th><th class="num">Responses</th></tr></thead><tbody>'
       +(hist.length?hist.slice().reverse().map(function(w){var v=w.npsTw!=null?w.npsTw:w.npsComputed;var dl=(w.npsTw!=null&&w.npsLw!=null)?(w.npsTw-w.npsLw):null;
@@ -1656,9 +1669,10 @@ PAGES.fanscore=function(){
       +'</tbody></table></div></div>';
     h+='<div class="card" style="margin-top:12px" id="fsRespCard"></div>';
     setHTML(h);
+    var wsel=$("fsWeekTop");if(wsel)wsel.onchange=function(){fsLoad(this.value);};
     fsRenderResponses(resp);
   }).catch(errBox);
-};
+}
 
 // Map a period name to a [from,to] ISO range.
 function periodRange(p) {

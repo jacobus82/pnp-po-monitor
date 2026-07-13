@@ -1270,15 +1270,23 @@ export async function handleCustomerCountDaily(req: Request, env: Env): Promise<
 }
 
 /**
- * GET /api/fan-score/summary — the latest week's NPS summary from fan_score_weeks
- * (reported NPS TW/LW + computed promoter/detractor counts). { hasData:false } when empty.
+ * GET /api/fan-score/summary?week= — one week's NPS summary from fan_score_weeks
+ * (reported NPS TW/LW + computed promoter/detractor counts). Defaults to the latest
+ * week; `week` (week_ending) selects a specific week. { hasData:false } when empty.
  */
-export async function handleFanScoreSummary(env: Env): Promise<Response> {
+export async function handleFanScoreSummary(req: Request, env: Env): Promise<Response> {
+  const week = new URL(req.url).searchParams.get("week");
   const w = await env.DB.prepare(
-    `SELECT week_ending, site_code, nps_tw, nps_lw, total_responses, scored_responses,
+    week
+      ? `SELECT week_ending, site_code, nps_tw, nps_lw, total_responses, scored_responses,
             promoters, passives, detractors, nps_computed
-     FROM fan_score_weeks ORDER BY week_ending DESC LIMIT 1`,
-  ).first<{
+         FROM fan_score_weeks WHERE week_ending = ? LIMIT 1`
+      : `SELECT week_ending, site_code, nps_tw, nps_lw, total_responses, scored_responses,
+            promoters, passives, detractors, nps_computed
+         FROM fan_score_weeks ORDER BY week_ending DESC LIMIT 1`,
+  )
+    .bind(...(week ? [week] : []))
+    .first<{
     week_ending: string;
     site_code: string | null;
     nps_tw: number | null;
@@ -1307,18 +1315,26 @@ export async function handleFanScoreSummary(env: Env): Promise<Response> {
 }
 
 /**
- * GET /api/fan-score/history — the last 8 complete weeks from fan_score_weeks,
- * oldest-first so the trend chart reads left-to-right. Powers the Fan Score
- * mini-dashboard trend + week-history table.
+ * GET /api/fan-score/history?week= — 8 complete weeks from fan_score_weeks,
+ * oldest-first so the trend chart reads left-to-right. Defaults to the latest 8;
+ * `week` (week_ending) returns the 8 weeks ENDING at that week (rolling window).
+ * Powers the Fan Score trend + week-history table.
  */
-export async function handleFanScoreHistory(env: Env): Promise<Response> {
+export async function handleFanScoreHistory(req: Request, env: Env): Promise<Response> {
+  const week = new URL(req.url).searchParams.get("week");
   const rows =
     (
       await env.DB.prepare(
-        `SELECT week_ending, nps_tw, nps_lw, nps_computed,
+        week
+          ? `SELECT week_ending, nps_tw, nps_lw, nps_computed,
                 total_responses, scored_responses, promoters, passives, detractors
-         FROM fan_score_weeks ORDER BY week_ending DESC LIMIT 8`,
-      ).all<{
+             FROM fan_score_weeks WHERE week_ending <= ? ORDER BY week_ending DESC LIMIT 8`
+          : `SELECT week_ending, nps_tw, nps_lw, nps_computed,
+                total_responses, scored_responses, promoters, passives, detractors
+             FROM fan_score_weeks ORDER BY week_ending DESC LIMIT 8`,
+      )
+        .bind(...(week ? [week] : []))
+        .all<{
         week_ending: string;
         nps_tw: number | null;
         nps_lw: number | null;

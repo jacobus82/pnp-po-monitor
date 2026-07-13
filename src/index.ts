@@ -2282,8 +2282,8 @@ export default {
       if (path === "/api/customer-counts/daily" && m === "GET")
         return await handleCustomerCountDaily(req, env);
       if (path === "/api/fan-score-uploads" && m === "POST") return await handleFanScoreUpload(req, env);
-      if (path === "/api/fan-score/summary" && m === "GET") return await handleFanScoreSummary(env);
-      if (path === "/api/fan-score/history" && m === "GET") return await handleFanScoreHistory(env);
+      if (path === "/api/fan-score/summary" && m === "GET") return await handleFanScoreSummary(req, env);
+      if (path === "/api/fan-score/history" && m === "GET") return await handleFanScoreHistory(req, env);
       if (path === "/api/fan-score/responses" && m === "GET") return await handleFanScoreResponses(req, env);
 
       if (path === "/api/uploads/reset" && m === "POST") {
