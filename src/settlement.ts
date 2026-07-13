@@ -275,7 +275,9 @@ export async function handleSettlement(req: Request, env: Env): Promise<Response
               gr_count, gr_date, statement_no, statement_amount, variance_zar, status, is_direct, aging_days
        FROM settlement_ledger WHERE week_code = ? ORDER BY ABS(COALESCE(variance_zar,0)) DESC`,
     ).bind(week).all<Record<string, number | string | null>>(),
-    env.DB.prepare(`SELECT DISTINCT week_code FROM settlement_ledger WHERE week_code IS NOT NULL ORDER BY week_code DESC`).all<{ week_code: string }>(),
+    // Only weeks with actual EOD goods-receipt data are reconcilable; statement-
+    // only weeks (a statement loaded with no EOD) are excluded from the picker.
+    env.DB.prepare(`SELECT DISTINCT week_code FROM settlement_ledger WHERE side='eod' AND week_code IS NOT NULL ORDER BY week_code DESC`).all<{ week_code: string }>(),
     env.DB.prepare(
       `SELECT return_doc, reference, po_number, supplier_name, return_date, return_value, credit_stmt_no, credit_amount, status, aging_days
        FROM return_credits WHERE week_code = ? ORDER BY aging_days DESC`,

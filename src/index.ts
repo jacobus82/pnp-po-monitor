@@ -29,6 +29,7 @@ import {
   notAgedOutSql,
   insertEodMovements,
   deleteEodByDates,
+  deleteEodByDocs,
   type InsertedLine,
 } from "./db/repo";
 import {
@@ -523,10 +524,13 @@ async function handleEodUpload(req: Request, env: Env): Promise<Response> {
       return json({ status: "parsed_empty", uploadId, format: parsed.format, warnings: parsed.warnings }, 422);
     }
 
-    // Replace-on-reload: clear prior EOD rows for the dates this file covers, so a
-    // re-export of the same week replaces it instead of double-counting.
+    // Replace-on-reload, idempotent by BOTH the week's dates AND the movement
+    // DocumentNos in this file — so the same movement can never be contributed to
+    // the ledger twice, whether from a re-export or an overlapping-week file.
     const dates = [...new Set(parsed.rows.map((r) => r.date).filter((d): d is string => !!d))];
+    const docNos = parsed.rows.map((r) => r.docNo).filter((d): d is string => !!d);
     await deleteEodByDates(env, dates);
+    await deleteEodByDocs(env, docNos);
 
     const inserted = await insertEodMovements(env, uploadId, parsed.rows);
     await markUploadParsed(env, uploadId, parsed.format, inserted, parsed.skippedDcClaims);

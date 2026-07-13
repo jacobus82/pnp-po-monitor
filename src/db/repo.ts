@@ -460,6 +460,21 @@ export async function deleteEodByDates(env: Env, dates: string[]): Promise<void>
   }
 }
 
+/**
+ * Delete EOD movements by material DocumentNo — the stable per-movement identity.
+ * Ingest calls this with the incoming file's doc_nos so the SAME movement can
+ * never be contributed to the ledger twice, even across overlapping-week files or
+ * re-exports where mvmt_date-based clearing would miss it.
+ */
+export async function deleteEodByDocs(env: Env, docNos: string[]): Promise<void> {
+  const docs = [...new Set(docNos.filter((d): d is string => !!d && d.trim() !== ""))];
+  if (!docs.length) return;
+  for (const c of chunk(docs, 50)) {
+    const ph = c.map(() => "?").join(",");
+    await env.DB.prepare(`DELETE FROM eod_movements WHERE doc_no IN (${ph})`).bind(...c).run();
+  }
+}
+
 /** Persist EOD movement rows. Batched in chunks of 200 (as insertGrLines). */
 export async function insertEodMovements(env: Env, uploadId: number, rows: EodRow[]): Promise<number> {
   if (rows.length === 0) return 0;
