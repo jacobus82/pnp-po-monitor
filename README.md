@@ -246,6 +246,38 @@ curl "…/api/fan-score/summary?week="                   # + /history?week= , /r
 curl "…/api/fim/by-period"                             # fiscal-period rollup w/ date ranges
 ```
 
+## Settlement — GR ↔ statement reconciliation (money recovery)
+
+`POST /api/eod-uploads` ingests the weekly **End-of-Day Movements Report** (`.txt`
+tab-delimited latin-1, or older `.htm` ALV table — sniffed by content) into
+`eod_movements`. Each ingest re-evaluates the persisted settlement ledger, matching
+what we **received** (EOD goods receipts) against what PnP **billed** (statement
+INVOICE lines). The match unit is the **LIV DocNo** (= statement `doc_number`), with
+EOD GR rows **aggregated per LIV first** — one invoice covers many receipts, so
+row-level comparison would double-count.
+
+Three buckets per fiscal week, plus a billing-variance claims list:
+
+| Bucket | Meaning |
+|--------|---------|
+| **Matched** | LIV on a statement, within tolerance (R5 direct / R2,000 DC-MA15) |
+| **Received, not billed** | EOD LIVs / uninvoiced GRs not yet on any statement (aged, flagged > 14 days) |
+| **Billed, not received** | Statement LIVs with no EOD goods receipt |
+| **Claims (variance)** | Per-LIV signed `GR total − LIV value` beyond tolerance — the list to raise |
+
+`FRANCHISE ONE TIME VENDOR` lines are excluded. Each Goods Return Note is tracked
+for its statement DCRC credit; returns with no credit after 14 days are flagged.
+
+The **Settlement** screen (Purchasing group) has a fiscal-week picker, the four
+summary tiles, the variance/aging/returns/billed tables, and a drill: clicking a
+variance row opens the underlying EOD GR rows + statement lines.
+
+```bash
+curl -X POST "…/api/eod-uploads?filename=eod_06.07-12.07.2026.txt" --data-binary @eod.txt
+curl "…/api/settlement?week=202719"          # three-bucket reconciliation + claims
+curl "…/api/settlement/liv?liv=5149590384"   # drill: EOD GR rows + statement lines
+```
+
 > Data note: the D1 database caps large ingests (~60k rows/upload) on the per-operation
 > CPU limit; `fim_daily` mixes daily/weekly/monthly `report_type` rows, so read it via
 > the finest-resolution CTE (`fimResolvedCte` in `src/analytics.ts`) rather than raw
