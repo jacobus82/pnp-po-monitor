@@ -638,27 +638,30 @@ function monthlySeries(rows,key,anchor){
 }
 // Lens 4 — monthly average unit price line over the last 12 months, each existing
 // point labelled with its price; gaps (no orders that month) leave a break.
-function artPriceChart(priceMonthly,anchor){
+function artPriceChart(priceMonthly,anchor,spike){
   var months=last12Months(anchor);
   if(!months.length)return '<div class="muted small">No price history.</div>';
   var byM={};(priceMonthly||[]).forEach(function(p){byM[p.month]=p});
   var pts=months.map(function(ym,i){var p=byM[ym];return {i:i,month:ym,value:(p&&p.unitPriceCents!=null)?(p.unitPriceCents/100):null}});
   var ex=pts.filter(function(p){return p.value!=null});
   if(!ex.length)return '<div class="muted small">No unit price in the last 12 months.</div>';
+  var spikeMonth=spike?String(spike).slice(0,7):null;var spikeIdx=spikeMonth?months.indexOf(spikeMonth):-1;
   var W=760,H=250,pad=48,n=months.length;
   var vals=ex.map(function(p){return p.value});
   var mx=Math.max.apply(null,vals),mn=Math.min.apply(null,vals);
   if(mx<=mn)mx=mn+Math.max(1,mn*0.1);var span=mx-mn||1;mn=Math.max(0,mn-span*0.2);mx=mx+span*0.28;
   function X(i){return pad+(n<=1?(W-2*pad)/2:i*(W-2*pad)/(n-1))}
   function Y(v){return H-pad-((v-mn)/(mx-mn))*(H-2*pad)}
+  // Highlight the spike month (from a PRICE_SPIKE drill-through): a red guide line + ring.
+  var hl=spikeIdx>=0?'<line x1="'+X(spikeIdx).toFixed(1)+'" y1="'+pad+'" x2="'+X(spikeIdx).toFixed(1)+'" y2="'+(H-pad)+'" stroke="#BE1D37" stroke-width="1.5" stroke-dasharray="4 3"/><text x="'+X(spikeIdx).toFixed(1)+'" y="'+(pad-4)+'" font-size="9" font-weight="700" text-anchor="middle" fill="#BE1D37">price spike</text>':'';
   var line='<polyline points="'+ex.map(function(p){return X(p.i).toFixed(1)+","+Y(p.value).toFixed(1)}).join(" ")+'" fill="none" stroke="#2E6CA8" stroke-width="2"/>';
-  var dots=ex.map(function(p){return '<circle cx="'+X(p.i).toFixed(1)+'" cy="'+Y(p.value).toFixed(1)+'" r="3.5" fill="#2E6CA8"><title>'+esc(monLabel(p.month))+": "+R(p.value*100)+'</title></circle>'}).join("");
-  var vlabs=ex.map(function(p){return '<text x="'+X(p.i).toFixed(1)+'" y="'+Math.max(12,Y(p.value)-8).toFixed(1)+'" font-size="9" font-weight="700" text-anchor="middle" fill="#2E6CA8">'+R(p.value*100)+'</text>'}).join("");
-  var xlabs=months.map(function(ym,i){return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(monLabel(ym))+'</text>'}).join("");
+  var dots=ex.map(function(p){var isSpike=p.i===spikeIdx;return '<circle cx="'+X(p.i).toFixed(1)+'" cy="'+Y(p.value).toFixed(1)+'" r="'+(isSpike?5:3.5)+'" fill="'+(isSpike?"#BE1D37":"#2E6CA8")+'"><title>'+esc(monLabel(p.month))+": "+R(p.value*100)+'</title></circle>'}).join("");
+  var vlabs=ex.map(function(p){return '<text x="'+X(p.i).toFixed(1)+'" y="'+Math.max(12,Y(p.value)-8).toFixed(1)+'" font-size="9" font-weight="700" text-anchor="middle" fill="'+(p.i===spikeIdx?"#BE1D37":"#2E6CA8")+'">'+R(p.value*100)+'</text>'}).join("");
+  var xlabs=months.map(function(ym,i){return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="'+(i===spikeIdx?"#BE1D37":"#6a7480")+'" text-anchor="middle">'+esc(monLabel(ym))+'</text>'}).join("");
   var yax='<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+R(mx*100)+'</text><text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">'+R(mn*100)+'</text>';
-  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+line+dots+vlabs+yax+xlabs+'</svg></div>';
+  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+hl+line+dots+vlabs+yax+xlabs+'</svg></div>';
 }
-function openArticle(code){openModal("Article "+esc(code),'<div class="loading">Loading\\u2026</div>');
+function openArticle(code,spike){openModal("Article "+esc(code),'<div class="loading">Loading\\u2026</div>');
   api("/api/articles/"+encodeURIComponent(code)).then(function(d){
     var k=d.kpis||{},fim=d.fim;
     var pb=k.price_basis==="unit"?("per "+esc(k.sku_uom||"unit")):"per order unit";
@@ -672,7 +675,7 @@ function openArticle(code){openModal("Article "+esc(code),'<div class="loading">
       +kpi("FIM waste / shrink",fim?(Rr0(fim.waste)+" / "+Rr0(fim.shrink)):'\\u2014',fim?"FIM article rows":fimHint)
       +'</div>';
     // Lens 4 — 12-month monthly average unit price.
-    var priceChart='<div class="card" style="margin-top:14px"><h2>Unit price \\u00b7 monthly average <span class="muted small">last 12 months</span></h2>'+artPriceChart(d.priceMonthly,d.anchor)+'</div>';
+    var priceChart='<div class="card" style="margin-top:14px"><h2>Unit price \\u00b7 monthly average <span class="muted small">last 12 months</span>'+(spike?' <span class="small" style="color:#BE1D37">\\u00b7 spike '+esc(spike)+'</span>':'')+'</h2>'+artPriceChart(d.priceMonthly,d.anchor,spike)+'</div>';
     // Lens 5 — GR value by month; waste/shrink by month where FIM has the article.
     var grBars='<div class="card" style="margin-top:14px"><h2>GR value received by month <span class="muted small">@ cost</span></h2>'+colChart(monthlySeries(d.grMonthly,"cost",d.anchor),{valueLabels:true,valueFmt:Rr0})+'</div>';
     var wasteShrink;
@@ -1160,14 +1163,21 @@ function wsLoad(){
     h+='<div class="card"><h2>Weekly waste &amp; shrink trend (last 13 weeks)</h2>'+wasteTrendChart(d.trend||[])+'</div>';
     el.innerHTML=h;
     el.onclick=function(e){var tr=e.target.closest(".wd-row");if(tr)toggleWasteDept(tr.getAttribute("data-dept"),pf,pt,tr)};
+    // Auto-expand + highlight the drilled-to department (from an anomaly click).
+    if(window._wasteExpandDept){var dep=window._wasteExpandDept;window._wasteExpandDept=null;var tr=document.getElementById("wdtr-"+dep);if(tr){toggleWasteDept(dep,pf,pt,tr);if(tr.scrollIntoView)tr.scrollIntoView({behavior:"smooth",block:"center"});tr.style.outline="2px solid var(--nav)";}}
   }).catch(function(e){el.innerHTML='<div class="err">'+esc(e&&e.message||e)+'</div>'});
 }
+var _wasteExpandDept=null;
 PAGES.waste=function(){
+  var rp=routeParams();
   var saved="prevweek";try{saved=localStorage.getItem("waste-period")||"prevweek"}catch(e){}
+  // Drill-through from a FIM waste/shrink anomaly: scope to the anomaly's month + dept.
+  var drillFrom=null,drillTo=null;
+  if(rp.dept){saved="custom";if(rp.date){drillFrom=String(rp.date).slice(0,7)+"-01";drillTo=new Date(Date.UTC(+rp.date.slice(0,4),+rp.date.slice(5,7),0)).toISOString().slice(0,10);}_wasteExpandDept=rp.dept;try{localStorage.setItem("waste-period","custom")}catch(e){}}
   var opts=[["wtd","This Week"],["prevweek","Last Week"],["mtd","This Month"],["prevmonth","Last Month"],["fy","This FY"],["lastfy","Last FY"],["custom","Custom\\u2026"]];
   var bar='<div class="toolbar"><label class="small muted">Period</label>'
     +'<select class="sel" id="wsPeriod">'+opts.map(function(o){return '<option value="'+o[0]+'"'+(o[0]===saved?" selected":"")+'>'+o[1]+'</option>'}).join("")+'</select>'
-    +'<span id="wsCustom"'+(saved==="custom"?"":" hidden")+'><input type="date" class="inp" id="wsFrom"> <input type="date" class="inp" id="wsTo"> <button class="btn" id="wsApply">Apply</button></span>'
+    +'<span id="wsCustom"'+(saved==="custom"?"":" hidden")+'><input type="date" class="inp" id="wsFrom"'+(drillFrom?' value="'+drillFrom+'"':'')+'> <input type="date" class="inp" id="wsTo"'+(drillTo?' value="'+drillTo+'"':'')+'> <button class="btn" id="wsApply">Apply</button></span>'
     +'<span id="wsRange" class="tag"></span></div>';
   setHTML(bar+'<div id="wsBody"><div class="loading">Loading\\u2026</div></div>');
   $("wsPeriod").onchange=function(){var cu=$("wsCustom");if(cu)cu.hidden=this.value!=="custom";try{localStorage.setItem("waste-period",this.value)}catch(e){}; if(this.value!=="custom")wsLoad()};
@@ -1507,38 +1517,68 @@ PAGES.budgets=function(){loading();api("/api/budgets/summary").then(function(d){
 
 // ---- Weekly / Monthly / FY share a period engine ----
 function weekBounds(d){var x=new Date(d+"T00:00:00Z");var dow=(x.getUTCDay()+6)%7;var mon=new Date(x);mon.setUTCDate(x.getUTCDate()-dow);var sun=new Date(mon);sun.setUTCDate(mon.getUTCDate()+6);return [mon.toISOString().slice(0,10),sun.toISOString().slice(0,10)]}
+function ddmm(iso){var p=String(iso).slice(0,10).split("-");return p.length<3?String(iso):p[2]+"."+p[1]}
+// Mon..Sun scaffold for a [from,to] week so every day shows even with no data.
+function dayScaffold(b){var days=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"],out=[];for(var i=0;i<7;i++){var dt=new Date(b[0]+"T00:00:00Z");dt.setUTCDate(dt.getUTCDate()+i);out.push({day:days[i],date:dt.toISOString().slice(0,10)})}return out}
 
 PAGES.weekly=function(){
-  setHTML('<div class="toolbar"><label class="small muted">Week of</label><input class="inp" type="date" id="wkpick"><span id="wkrange" class="tag"></span></div><div id="wkbody"><div class="loading">Loading\\u2026</div></div>');
-  function load(date){if($("wkpick").value!==date)$("wkpick").value=date;
-    // Use the official fiscal week (lookup) for boundaries + label; fall back to Mon–Sun.
-    api("/api/fiscal/week?date="+date).then(function(fw){
-      var b,labelPrefix="";
-      if(fw.week){b=[fw.week.week_start,fw.week.week_end];labelPrefix=fw.week.fiscal_week_code+" \\u00b7 ";}
-      else b=weekBounds(date);
-      $("wkrange").innerHTML=esc(labelPrefix)+esc(b[0])+' <span class="muted">\\u2192</span> '+esc(b[1]);
-      runWeek(b);
-    }).catch(function(){var b=weekBounds(date);$("wkrange").innerHTML=esc(b[0])+' <span class="muted">\\u2192</span> '+esc(b[1]);runWeek(b)});
-  }
-  function runWeek(b){
-    Promise.all([api("/api/purchases/summary?groupBy=day&from="+b[0]+"&to="+b[1]),api("/api/vendors?from="+b[0]+"&to="+b[1]),api("/api/categories"),api("/api/settings"),api("/api/anomalies?resolved=false&limit=40"),api("/api/gr/period?from="+b[0]+"&to="+b[1]),api("/api/fim/period?from="+b[0]+"&to="+b[1])]).then(function(res){
-      var sum=res[0],ven=res[1],cat=res[2],sett=res[3].settings||{},an=res[4],gr=res[5],fim=res[6];
-      var cap=Number(sett.weekly_cap||2000000)*100;var t=sum.totals||{};var used=cap?Math.round((t.purchases||0)/cap*1000)/10:0;
+  var rp=routeParams();
+  setHTML('<div class="toolbar" style="gap:10px;flex-wrap:wrap"><label class="small muted">Fiscal week <select class="sel" id="wkSel"><option>Loading\\u2026</option></select></label>'
+    +'<label class="small muted">or date <input class="inp" type="date" id="wkDate" title="snaps to the Monday of its fiscal week" style="width:150px"></label>'
+    +'<span id="wkrange" class="tag"></span></div><div id="wkbody"><div class="loading">Loading\\u2026</div></div>');
+  var WEEKS=[];
+  function mtable(cols,rows){return makeTable(cols,rows,{search:false,rowMenu:false})}
+  function marginCell(r){return r.margin!=null?r.margin.toFixed(1)+"%":"\\u2014"}
+  function runWeek(b,label){
+    $("wkrange").innerHTML=(label?esc(label)+' \\u00b7 ':'')+esc(b[0])+' <span class="muted">\\u2192</span> '+esc(b[1]);
+    var body=$("wkbody");body.innerHTML='<div class="loading">Loading\\u2026</div>';
+    Promise.all([
+      api("/api/weekly/day-blocks?from="+b[0]+"&to="+b[1]),
+      api("/api/vendors?from="+b[0]+"&to="+b[1]),
+      api("/api/categories"),
+      api("/api/settings"),
+      api("/api/anomalies/scoped?from="+b[0]+"&to="+b[1]+"&resolved=false&limit=60"),
+      api("/api/gr/period?from="+b[0]+"&to="+b[1]),
+      api("/api/fim/period?from="+b[0]+"&to="+b[1])
+    ]).then(function(res){
+      var db=res[0],ven=res[1],cat=res[2],sett=res[3].settings||{},an=res[4],gr=res[5],fim=res[6];
+      var poTot=(db.po||[]).reduce(function(a,d){return {p:a.p+(d.purchasesCents||0),r:a.r+(d.returnsCents||0),l:a.l+(d.lines||0)}},{p:0,r:0,l:0});
+      var cap=Number(sett.weekly_cap||2000000)*100;var net=poTot.p-poTot.r;var used=cap?Math.round(net/cap*1000)/10:0;
+      var h='<div class="cards kpis">'+kpi("Total purchase orders",R(net),"net \\u00b7 gross "+R(poTot.p))+kpi("Returns",R(poTot.r),null)+kpi("Lines",num(poTot.l),null)+kpi("Budget used",used+"%",statusPill(trafficFor(used))+" of "+R0(cap))+'</div>';
       var topV=(ven.vendors||[]).slice(0,10).map(function(v){return {label:v.name||v.code,value:(v.purchases||0)/100}});
       var topC=(cat.categories||[]).slice(0,10).map(function(c){return {label:c.code,value:(c.purchases||0)/100}});
-      var days=["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];var byd={};(sum.series||[]).forEach(function(s){byd[s.key]=s});
-      var rowsD=[];for(var i=0;i<7;i++){var dt=new Date(b[0]+"T00:00:00Z");dt.setUTCDate(dt.getUTCDate()+i);var ds=dt.toISOString().slice(0,10);var s=byd[ds]||{purchases:0,returns:0,lines:0};rowsD.push({day:days[i],date:ds,purchases:s.purchases,returns:s.returns,lines:s.lines})}
-      var h='<div class="cards kpis">'+kpi("Total purchases",R(t.purchases),null)+kpi("Open to deliver",R(t.open_deliver),null)+kpi("Lines",num(t.lines),null)+kpi("Budget used",used+"%",statusPill(trafficFor(used))+" of "+R0(cap))+'</div>';
       h+='<div class="cards g2"><div class="card"><h2>Top 10 vendors</h2>'+hbars(topV,null,R0)+'</div><div class="card"><h2>Top 10 categories</h2>'+hbars(topC,null,R0)+'</div></div>';
-      h+='<div class="cards g2" style="margin-top:14px"><div class="card"><h2>Day-by-day purchases</h2>'+makeTable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"purchases",label:"Purchases",num:true,fmt:R},{key:"returns",label:"Returns",num:true,fmt:R},{key:"lines",label:"Lines",num:true}],rowsD,{search:false,rowMenu:false})+'</div>';
-      h+='<div class="card"><h2>Anomalies this week</h2><table><tbody>'+((an.anomalies||[]).slice(0,12).map(function(a){return '<tr><td class="sev-'+a.severity+'">'+a.severity+'</td><td class="small">'+esc(a.message)+'</td></tr>'}).join("")||'<tr><td class="muted">None.</td></tr>')+'</tbody></table></div></div>';
+      var scaf=dayScaffold(b),poBy={},grBy={},fimBy={};
+      (db.po||[]).forEach(function(x){poBy[x.date]=x});(db.gr||[]).forEach(function(x){grBy[x.date]=x});(db.fim||[]).forEach(function(x){fimBy[x.date]=x});
+      var poRows=scaf.map(function(s){var x=poBy[s.date]||{};return {day:s.day,date:s.date,purchases:x.purchasesCents||0,returns:x.returnsCents||0,lines:x.lines||0}});
+      var grRows=scaf.map(function(s){var x=grBy[s.date]||{};return {day:s.day,date:s.date,cost:x.costZar||0,sell:x.sellZar||0,margin:x.marginPct}});
+      var fimRows=scaf.map(function(s){var x=fimBy[s.date]||{};return {day:s.day,date:s.date,sales:x.salesZar||0,cos:x.cosZar||0,margin:x.marginPct}});
+      // Four day-by-day blocks: purchase orders, goods receipts, FIM margins, + anomalies.
+      h+='<div class="cards g2" style="margin-top:14px">'
+        +'<div class="card"><h2>Day by day purchase orders</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"purchases",label:"Purchases",num:true,fmt:R},{key:"returns",label:"Returns",num:true,fmt:R},{key:"lines",label:"Lines",num:true}],poRows)+'</div>'
+        +'<div class="card"><h2>Day by day goods receipts</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"cost",label:"GR cost",num:true,fmt:Rr0},{key:"sell",label:"GR sell",num:true,fmt:Rr0},{key:"margin",label:"Margin",num:true,html:marginCell}],grRows)+'</div>'
+        +'</div>';
+      h+='<div class="cards g2" style="margin-top:14px">'
+        +'<div class="card"><h2>Day by day FIM margins</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"sales",label:"Sales",num:true,fmt:Rr0},{key:"cos",label:"COS",num:true,fmt:Rr0},{key:"margin",label:"POS margin",num:true,html:marginCell}],fimRows)+'<div class="legend">Fresh-B departments contribute weekly-averaged margins (daily figures suppressed).</div></div>'
+        +'<div class="card"><h2>Anomalies this week</h2>'+anomTableHTML(an.anomalies||[],false,"this week")+'</div>'
+        +'</div>';
       h+=grFimSection(gr,fim);
-      $("wkbody").innerHTML=h;
-    }).catch(function(e){$("wkbody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});
+      body.innerHTML=h;
+    }).catch(function(e){body.innerHTML='<div class="err">'+esc(e.message)+'</div>'});
   }
-  $("wkpick").onchange=function(){load(this.value)};
-  // Default to the latest week that actually has PO data.
-  api("/api/meta/range").then(function(m){var d=(m.po&&m.po.max)||new Date().toISOString().slice(0,10);load(d)}).catch(function(){load(new Date().toISOString().slice(0,10))});
+  function selectWeek(code){var w=WEEKS.filter(function(x){return x.code===code})[0];if(!w)return;$("wkSel").value=code;runWeek([w.from,w.to],w.pretty);}
+  api("/api/periods").then(function(p){
+    WEEKS=(p.weeks||[]).map(function(w){var yr=String(w.code).slice(0,4),wn=String(w.code).slice(4);return {code:w.code,from:w.from,to:w.to,pretty:yr+" W"+wn+" \\u00b7 "+ddmm(w.from)+"\\u2013"+ddmm(w.to)}});
+    $("wkSel").innerHTML=WEEKS.length?WEEKS.map(function(w){return '<option value="'+esc(w.code)+'">'+esc(w.pretty)+'</option>'}).join(""):'<option>No weeks</option>';
+    $("wkSel").onchange=function(){selectWeek(this.value)};
+    if(WEEKS[0])$("wkDate").max=WEEKS[0].to;
+    // Custom date snaps to the Monday of its fiscal week (or Mon-Sun fallback).
+    $("wkDate").onchange=function(){var d=this.value;if(!d)return;var w=WEEKS.filter(function(x){return x.from<=d&&d<=x.to})[0];if(w){selectWeek(w.code)}else{$("wkSel").value="";runWeek(weekBounds(d),"Custom (Mon-start)")}};
+    // Initial week: OVER_BUDGET drill (from/to), else the most recent fiscal week.
+    if(rp.from&&rp.to){var wm=WEEKS.filter(function(x){return x.from===rp.from&&x.to===rp.to})[0];if(wm){selectWeek(wm.code)}else{runWeek([rp.from,rp.to],"Selected")}}
+    else if(WEEKS.length){selectWeek(WEEKS[0].code)}
+    else{runWeek(weekBounds(new Date().toISOString().slice(0,10)),"")}
+  }).catch(function(e){$("wkbody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});
 };
 
 PAGES.monthly=function(){
@@ -1598,8 +1638,10 @@ PAGES.vendors=function(){
 };
 
 var _artRows=[],_artRank="po";
-PAGES.articles=function(){loading();api("/api/articles?limit=1000").then(function(d){
+PAGES.articles=function(){var rp=routeParams();loading();api("/api/articles?limit=1000").then(function(d){
   _artRows=d.articles||[];artRender();
+  // Drill-through from a PRICE_SPIKE anomaly: open the article, highlight the spike month.
+  if(rp.article)openArticle(rp.article,rp.spike||null);
 }).catch(errBox)};
 function artRank(m){_artRank=m;artRender();}
 function artRender(){
@@ -2040,6 +2082,7 @@ PAGES.shortage=function(){fimAnalysis("shperiod","shbody",function(el,deps){
 })};
 
 PAGES.open=function(){
+  var rp=routeParams();
   setHTML('<div class="toolbar"><label class="small muted">Filter</label><select class="sel" id="ofilter"><option value="both">Open to deliver or invoice</option><option value="deliver">Open to deliver</option><option value="invoice">Open to invoice</option></select></div><div id="obody"><div class="loading">Loading\\u2026</div></div>');
   function load(f){api("/api/open-orders?filter="+f+"&limit=3000").then(function(d){
     var ag=d.aging||{count:{},value:{}};var c=ag.count||{},v=ag.value||{};
@@ -2069,6 +2112,8 @@ PAGES.open=function(){
     $("obody").innerHTML=h;
   }).catch(function(e){$("obody").innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
   $("ofilter").onchange=function(){load(this.value)};load("both");
+  // Drill-through from a stale-order anomaly: open that PO directly.
+  if(rp.po)openPO(rp.po);
 };
 
 PAGES.returns=function(){
@@ -2085,18 +2130,28 @@ PAGES.returns=function(){
   $("rgrp").onchange=function(){load(this.value)};load("all");
 };
 
+// Shared clickable anomaly table (rows from /api/anomalies/scoped). Drill-through is
+// handled by the one document-level delegated listener via each row's data-drill.
+// Optional showAck adds an Acknowledge button column (stopPropagation guards drill).
+function anomTableHTML(list,showAck,emptyNote){
+  if(!list||!list.length)return '<div class="muted small" style="padding:10px">No anomalies'+(emptyNote?" "+esc(emptyNote):"")+'.</div>';
+  var rows=list.map(function(a){
+    var dr=a.drill?(' data-drill="'+esc(a.drill)+'" style="cursor:pointer"'):'';
+    return '<tr'+dr+'><td><span class="sev-'+(a.severity||"INFO")+'">'+(a.severity||"INFO")+'</span></td>'
+      +'<td class="small">'+esc(a.type)+'</td>'
+      +'<td class="small">'+esc(a.message)+'</td>'
+      +'<td class="small muted">'+esc(a.refDate||"")+'</td>'
+      +'<td class="small">'+(a.drill?'<span class="link">open \\u2192</span>':'')
+        +(showAck?(a.resolved?' <span class="muted">ack\\u2713</span>':' <button class="btn alt" onclick="ackAnom(event,'+a.id+')">Ack</button>'):'')+'</td></tr>';
+  }).join("");
+  return '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Type</th><th>Detail / suggested action</th><th>Date</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
 PAGES.anomalies=function(){
-  setHTML('<div class="toolbar"><select class="sel" id="asev"><option value="">All severities</option><option>CRITICAL</option><option>WARN</option><option>INFO</option></select><label class="small"><input type="checkbox" id="aack"> show acknowledged</label></div><div id="abody"><div class="loading">Loading\\u2026</div></div>');
+  setHTML('<div class="toolbar"><select class="sel" id="asev"><option value="">All severities</option><option>CRITICAL</option><option>WARN</option><option>INFO</option></select><label class="small"><input type="checkbox" id="aack"> show acknowledged</label><span class="small muted">Rows with <span class="link">open \\u2192</span> drill to the evidence.</span></div><div id="abody"><div class="loading">Loading\\u2026</div></div>');
   function load(){var sev=$("asev").value;var showAck=$("aack").checked;
-    api("/api/anomalies?limit=1000"+(sev?"&severity="+sev:"")+(showAck?"":"&resolved=false")).then(function(d){
-      var rows=(d.anomalies||[]).map(function(a){var det={};try{if(a.detail_json)det=JSON.parse(a.detail_json)}catch(e){det={}}return {id:a.id,severity:a.severity,type:a.type,article:det.articleDesc||det.article||"",po_number:det.poNumber||"",dept:det.deptCode||"",value:det.actualMargin!=null?det.actualMargin+"%":(det.lineValueCents!=null?R(det.lineValueCents):""),message:a.message,resolved:a.resolved,detected_at:a.detected_at}});
-      var h=makeTable([
-        {key:"severity",label:"Sev",html:function(r){return '<span class="sev-'+r.severity+'">'+r.severity+'</span>'}},
-        {key:"type",label:"Type"},{key:"dept",label:"Dept"},{key:"article",label:"Article"},{key:"po_number",label:"PO"},
-        {key:"message",label:"Detail / suggested action"},{key:"detected_at",label:"Date"},
-        {key:"resolved",label:"",html:function(r){return r.resolved?'<span class="muted small">ack\\u2713</span>':'<button class="btn alt" onclick="ackAnom(event,'+r.id+')">Acknowledge</button>'}}
-      ],rows,{rowMenu:true,onRow:function(){}});
-      $("abody").innerHTML='<div class="card"><h2>Risk & anomalies ('+rows.length+')</h2>'+h+'</div>';
+    api("/api/anomalies/scoped?limit=500"+(sev?"&severity="+sev:"")+(showAck?"":"&resolved=false")).then(function(d){
+      var list=d.anomalies||[];
+      $("abody").innerHTML='<div class="card"><h2>Risk & anomalies ('+list.length+')</h2>'+anomTableHTML(list,true,"")+'</div>';
     }).catch(function(e){$("abody").innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
   $("asev").onchange=load;$("aack").onchange=load;load();window._reloadAnom=load;
 };
@@ -2473,7 +2528,12 @@ function renderNav(){
 }
 
 // ---- router ----
-function go(){var hash=(location.hash||"#dashboard").slice(1);if(!PAGES[hash]){hash="dashboard"}
+// Split a hash like "#waste?dept=F05&date=2026-07-05" into the page key and its
+// params. Params are exposed as window._route for the target page to read once.
+function parseRoute(){var raw=(location.hash||"#dashboard").slice(1);var qi=raw.indexOf("?");var key=qi<0?raw:raw.slice(0,qi);var params={};if(qi>=0){raw.slice(qi+1).split("&").forEach(function(kv){if(!kv)return;var eq=kv.indexOf("=");var k=eq<0?kv:kv.slice(0,eq);var v=eq<0?"":kv.slice(eq+1);try{params[decodeURIComponent(k)]=decodeURIComponent(v)}catch(e){params[k]=v}})}return {key:key,params:params}}
+// Read (and consume) the route params a page was opened with.
+function routeParams(){var p=window._route||{};window._route={};return p}
+function go(){var pr=parseRoute();var hash=pr.key;window._route=pr.params;if(!PAGES[hash]){hash="dashboard"}
   // Highlight the single IMA nav item when on the dashboard or any group screen.
   document.querySelectorAll("#nav a").forEach(function(a){var r=a.getAttribute("data-r");a.classList.toggle("active",r===hash||(r==="ima"&&!!IMA_GROUP[hash]))});
   // Ensure the active link's group is expanded so the highlight is visible.
@@ -2484,6 +2544,10 @@ function go(){var hash=(location.hash||"#dashboard").slice(1);if(!PAGES[hash]){h
   closeNav();closeModal();try{PAGES[hash]()}catch(e){errBox(e)}}
 renderNav();
 window.addEventListener("hashchange",go);
+// Anomaly drill-through: ONE delegated click listener on the document (a stable
+// parent that survives every setHTML re-render). Any element carrying data-drill
+// navigates to its hash route, which the target page reads via routeParams().
+document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-drill]"):null;if(!row)return;var drill=row.getAttribute("data-drill");if(drill){ev.preventDefault();location.hash="#"+drill;}});
 function tick(){var s="Pick n Pay Lydenburg \\u00b7 "+new Date().toLocaleString("en-ZA",{hour12:false});$("clock").textContent=s;var sb=$("subbar");if(sb)sb.textContent=s}
 tick();setInterval(tick,1000);
 // NOTE: the timed auto-refresh that re-ran the current PAGES[hash]() every 60–120s

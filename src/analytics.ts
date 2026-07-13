@@ -3199,6 +3199,49 @@ export async function handleBudgetsSuggest(req: Request, env: Env): Promise<Resp
 }
 
 /**
+ * GET /api/weekly/day-blocks?from=&to= — day-by-day series for the weekly view:
+ * purchase orders (by order_date), goods receipts (by gr_date) and FIM store
+ * margins (by day, finest report_type resolved so Fresh-B contributes their
+ * weekly figure spread across the week — daily suppressed, not fabricated).
+ */
+export async function handleWeeklyDayBlocks(req: Request, env: Env): Promise<Response> {
+  const q = new URL(req.url).searchParams;
+  const from = q.get("from");
+  const to = q.get("to");
+  if (!from || !to) return json({ error: "from and to (YYYY-MM-DD) are required." }, 400);
+
+  const [poRes, grRes, fimRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT p.order_date d, SUM(${PURCH}) purchases, SUM(${RET}) returns, COUNT(*) lines
+       FROM po_lines p WHERE p.order_date BETWEEN ? AND ? GROUP BY p.order_date ORDER BY p.order_date`,
+    ).bind(from, to).all<{ d: string; purchases: number; returns: number; lines: number }>(),
+    env.DB.prepare(
+      `SELECT gr_date d, COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell,
+              COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) cost_m, COUNT(*) lines
+       FROM gr_lines WHERE gr_date BETWEEN ? AND ? GROUP BY gr_date ORDER BY gr_date`,
+    ).bind(from, to).all<{ d: string; cost: number; sell: number; cost_m: number; lines: number }>(),
+    env.DB.prepare(
+      `${fimResolvedCte("WITH")}
+       SELECT day d, COALESCE(SUM(net_sales_zar),0) sales, COALESCE(SUM(total_cos_zar),0) cos
+       FROM fr GROUP BY day ORDER BY day`,
+    ).bind(from, to).all<{ d: string; sales: number; cos: number }>(),
+  ]);
+
+  const blended = (cost: number, sell: number) => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
+  const po = (poRes.results ?? []).map((r) => ({
+    date: r.d, purchasesCents: Math.round(Number(r.purchases ?? 0)), returnsCents: Math.round(Number(r.returns ?? 0)), lines: r.lines,
+  }));
+  const gr = (grRes.results ?? []).map((r) => ({
+    date: r.d, costZar: Math.round(Number(r.cost)), sellZar: Math.round(Number(r.sell)), marginPct: blended(Number(r.cost_m), Number(r.sell)), lines: r.lines,
+  }));
+  const fim = (fimRes.results ?? []).map((r) => {
+    const sales = Number(r.sales), cos = Number(r.cos);
+    return { date: r.d, salesZar: Math.round(sales), cosZar: Math.round(cos), marginPct: sales > 0 ? Math.round(((sales - cos) / sales) * 1000) / 10 : null };
+  });
+  return json({ from, to, po, gr, fim });
+}
+
+/**
  * GET /api/budgets/generate-ly?week=&growthPct=&marginPct=
  * Weekly budget generated from LAST YEAR's FIM. For the target fiscal week, take
  * the CORRESPONDING fiscal week of the previous year (same week_no), read LY net

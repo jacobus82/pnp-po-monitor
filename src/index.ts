@@ -76,6 +76,7 @@ import {
   handleCashFlowFlags,
   handleBudgetsSuggest,
   handleBudgetsGenerateLy,
+  handleWeeklyDayBlocks,
   handleCreditorPayments,
   handleDashboardCashflow,
   handleWaste,
@@ -1148,6 +1149,114 @@ async function handleListAnomalies(req: Request, env: Env): Promise<Response> {
     .bind(...binds)
     .all();
   return json({ anomalies: rows.results });
+}
+
+/** Extract "Article 245804" / "PO 4767080280" from an anomaly message as a fallback. */
+function matchToken(message: string, prefix: string): string | null {
+  const m = new RegExp(prefix + "\\s+([A-Za-z0-9/]+)").exec(message ?? "");
+  return m ? m[1]! : null;
+}
+
+/**
+ * Derive an anomaly's business reference date and a drill-through hash route from
+ * its type + detail + joined PO/upload context. The hash carries the entity and
+ * period so the target screen opens pre-filtered.
+ */
+function deriveAnomalyDrill(
+  r: {
+    type: string; message: string; detail: Record<string, unknown>;
+    pl_order_date: string | null; pl_po: string | null; pl_article: string | null;
+    up_report_date: string | null; detected_at: string;
+  },
+  weekMap: Map<string, { start: string; end: string }>,
+): { refDate: string | null; drill: string | null } {
+  const enc = encodeURIComponent;
+  const d = r.detail;
+  switch (r.type) {
+    case "PRICE_SPIKE": {
+      const art = r.pl_article ?? matchToken(r.message, "Article");
+      const refDate = r.pl_order_date ?? null;
+      return { refDate, drill: art ? `articles?article=${enc(art)}${refDate ? `&spike=${enc(refDate)}` : ""}` : null };
+    }
+    case "STALE_OPEN_ORDER":
+    case "NEGATIVE_VALUE": {
+      const refDate = (d.orderDate as string) ?? r.pl_order_date ?? null;
+      const po = r.pl_po ?? matchToken(r.message, "PO");
+      return { refDate, drill: po ? `open?po=${enc(po)}` : null };
+    }
+    case "FIM_HIGH_WASTE":
+    case "FIM_HIGH_SHRINK":
+    case "FIM_MARGIN_BELOW_GUIDELINE":
+    case "FIM_PARTICIPATION_DEVIATION": {
+      const refDate = (d.reportDate as string) ?? null;
+      const dept = (d.deptCode as string) ?? null;
+      return { refDate, drill: dept ? `waste?dept=${enc(dept)}${refDate ? `&date=${enc(refDate)}` : ""}` : null };
+    }
+    case "OVER_BUDGET": {
+      const wc = d.weekCode != null ? String(d.weekCode) : null;
+      const wk = wc ? weekMap.get(wc) : null;
+      return { refDate: wk?.end ?? null, drill: wk ? `weekly?from=${enc(wk.start)}&to=${enc(wk.end)}` : null };
+    }
+    case "NEGATIVE_MARGIN":
+    case "LOW_MARGIN":
+      return { refDate: r.up_report_date ?? null, drill: "gr" };
+    default:
+      return { refDate: r.up_report_date ?? r.pl_order_date ?? (r.detected_at ? r.detected_at.slice(0, 10) : null), drill: null };
+  }
+}
+
+/**
+ * GET /api/anomalies/scoped?from=&to=&resolved=&limit= — anomalies enriched with a
+ * business reference date and a drill-through hash (Brief 4). When from/to are
+ * given, only anomalies whose refDate falls in the window are returned (fixes the
+ * weekly view showing the latest anomalies regardless of the selected week).
+ */
+async function handleScopedAnomalies(req: Request, env: Env): Promise<Response> {
+  const q = new URL(req.url).searchParams;
+  const from = q.get("from");
+  const to = q.get("to");
+  const where: string[] = [];
+  const binds: unknown[] = [];
+  if (q.get("resolved")) { where.push("a.resolved = ?"); binds.push(q.get("resolved") === "true" ? 1 : 0); }
+  if (q.get("severity")) { where.push("a.severity = ?"); binds.push(q.get("severity")); }
+  const limit = Math.min(Number(q.get("limit") ?? "60"), 500);
+
+  const [rowsRes, weeksRes] = await Promise.all([
+    env.DB.prepare(
+      `SELECT a.id, a.upload_id, a.po_line_id, a.type, a.severity, a.message, a.detail_json, a.resolved, a.detected_at,
+              pl.order_date pl_order_date, pl.po_number pl_po, art.article_code pl_article, u.report_date up_report_date
+       FROM anomalies a
+       LEFT JOIN po_lines pl ON pl.id = a.po_line_id
+       LEFT JOIN articles art ON art.id = pl.article_id
+       LEFT JOIN uploads u ON u.id = a.upload_id
+       ${where.length ? "WHERE " + where.join(" AND ") : ""}
+       ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, a.id DESC LIMIT 1000`,
+    ).bind(...binds).all<Record<string, string | number | null>>(),
+    env.DB.prepare(`SELECT fiscal_week_code code, week_start, week_end FROM fiscal_weeks`).all<{ code: string; week_start: string; week_end: string }>(),
+  ]);
+  const weekMap = new Map((weeksRes.results ?? []).map((w) => [w.code, { start: w.week_start, end: w.week_end }]));
+
+  const out = [];
+  for (const raw of rowsRes.results ?? []) {
+    let detail: Record<string, unknown> = {};
+    try { detail = raw.detail_json ? JSON.parse(String(raw.detail_json)) : {}; } catch { /* keep {} */ }
+    const { refDate, drill } = deriveAnomalyDrill(
+      {
+        type: String(raw.type), message: String(raw.message ?? ""), detail,
+        pl_order_date: (raw.pl_order_date as string) ?? null, pl_po: (raw.pl_po as string) ?? null,
+        pl_article: (raw.pl_article as string) ?? null, up_report_date: (raw.up_report_date as string) ?? null,
+        detected_at: String(raw.detected_at ?? ""),
+      },
+      weekMap,
+    );
+    if (from && to && !(refDate && refDate >= from && refDate <= to)) continue;
+    out.push({
+      id: raw.id, type: raw.type, severity: raw.severity, message: raw.message,
+      resolved: raw.resolved, refDate, drill,
+    });
+    if (out.length >= limit) break;
+  }
+  return json({ anomalies: out, scoped: !!(from && to), from: from ?? null, to: to ?? null });
 }
 
 /** POST /api/budgets — define or update a spend cap. */
@@ -2372,6 +2481,8 @@ export default {
       if (poLinesByNumber && m === "GET")
         return await handlePoLinesByNumber(env, decodeURIComponent(poLinesByNumber[1]!));
       if (path === "/api/anomalies" && m === "GET") return await handleListAnomalies(req, env);
+      if (path === "/api/anomalies/scoped" && m === "GET") return await handleScopedAnomalies(req, env);
+      if (path === "/api/weekly/day-blocks" && m === "GET") return await handleWeeklyDayBlocks(req, env);
       if (path === "/api/budget" && m === "GET") return await handleBudgetStatus(env);
       if (path === "/api/budgets" && m === "POST") return await handleCreateBudget(req, env);
 
