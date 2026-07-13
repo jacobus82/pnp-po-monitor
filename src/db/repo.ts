@@ -1,4 +1,5 @@
 import type { Env } from "../config";
+import type { EodRow } from "../parser/eodParser";
 import type { FiscalCalendar } from "../fiscal";
 import type {
   Anomaly,
@@ -75,7 +76,7 @@ export interface CreateUploadInput {
 export async function createUpload(
   env: Env,
   input: CreateUploadInput,
-  kind: "po" | "gr" | "fim" | "cc" | "fs" = "po",
+  kind: "po" | "gr" | "fim" | "cc" | "fs" | "eod" = "po",
 ): Promise<number> {
   const res = await env.DB.prepare(
     `INSERT INTO uploads (filename, r2_key, content_hash, size_bytes, status, kind)
@@ -448,6 +449,42 @@ export async function insertGrLines(
     );
   }
   return lines.length;
+}
+
+/** Delete EOD movements for a set of ISO dates (replace-on-reload by week). */
+export async function deleteEodByDates(env: Env, dates: string[]): Promise<void> {
+  if (!dates.length) return;
+  for (const c of chunk(dates, 50)) {
+    const ph = c.map(() => "?").join(",");
+    await env.DB.prepare(`DELETE FROM eod_movements WHERE mvmt_date IN (${ph})`).bind(...c).run();
+  }
+}
+
+/** Persist EOD movement rows. Batched in chunks of 200 (as insertGrLines). */
+export async function insertEodMovements(env: Env, uploadId: number, rows: EodRow[]): Promise<number> {
+  if (rows.length === 0) return 0;
+  const stmt = env.DB.prepare(
+    `INSERT INTO eod_movements (
+        upload_id, movement_type, mvmt_code, mvmt_date, doc_no, po_number, supplier_no,
+        supplier_name, reference, gr_reference, gr_val_ex, gr_vat, gr_val_in, currency,
+        inv_status, gr_liv_var, liv_doc, liv_date, liv_value, dcrc_type, claim_value
+     ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+  );
+  for (const c of chunk(rows, 200)) {
+    await env.DB.batch(
+      c.map((r) =>
+        stmt.bind(
+          uploadId,
+          r.movementType ?? null, r.mvmtCode ?? null, r.date ?? null, r.docNo ?? null,
+          r.poNumber ?? null, r.supplierNo ?? null, r.supplierName ?? null, r.reference ?? null,
+          r.grReference ?? null, r.grValEx ?? null, r.grVat ?? null, r.grValIn ?? null,
+          r.currency ?? null, r.invStatus ?? null, r.grLivVar ?? null, r.livDoc ?? null,
+          r.livDate ?? null, r.livValue ?? null, r.dcrcType ?? null, r.claimValue ?? null,
+        ),
+      ),
+    );
+  }
+  return rows.length;
 }
 
 /**

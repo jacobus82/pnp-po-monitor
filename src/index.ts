@@ -1,6 +1,8 @@
 import { STORE, type Env, thresholds, budgetStatus } from "./config";
 import { parseSapFile } from "./parser/sapParser";
 import { parseGrFile } from "./parser/grParser";
+import { parseEodFile } from "./parser/eodParser";
+import { recomputeSettlement, handleSettlement, handleSettlementLiv } from "./settlement";
 import { parseFimFile, aggregateCpToDept } from "./parser/fimParser";
 import { parseCustomerFile } from "./parser/customerParser";
 import { parseFanScoreFile } from "./parser/fanScoreParser";
@@ -25,6 +27,8 @@ import {
   committedOpenValueCents,
   openPoMaxAgeDays,
   notAgedOutSql,
+  insertEodMovements,
+  deleteEodByDates,
   type InsertedLine,
 } from "./db/repo";
 import {
@@ -483,6 +487,85 @@ async function handleGrUpload(req: Request, env: Env): Promise<Response> {
       { status: "error", uploadId, error: message || `${errorName} (no message)`, errorName, stack },
       500,
     );
+  }
+}
+
+/**
+ * POST /api/eod-uploads — ingest a weekly EOD Movements Report (.txt tab-delimited
+ * latin-1, or older .htm ALV table; sniffed by content). Archives to R2, parses to
+ * eod_movements, replaces prior rows for the same dates (idempotent per week), then
+ * re-evaluates the settlement ledger. The response reports the parsed GR total +
+ * movement counts so they can be eyeballed against SAP.
+ */
+async function handleEodUpload(req: Request, env: Env): Promise<Response> {
+  const read = await readUploadBytes(req, "eod");
+  if ("error" in read) return json({ error: read.error }, 400);
+  const { filename, bytes } = read;
+  if (bytes.byteLength === 0) return json({ error: "Empty body." }, 400);
+
+  const hash = await sha256Hex(bytes);
+  const existing = await findUploadByHash(env, hash);
+  if (existing) {
+    return json({ status: "duplicate", message: "This exact file was already ingested.", uploadId: existing.id }, 409);
+  }
+
+  const r2Key = `eod/${new Date().toISOString().slice(0, 10)}/${hash.slice(0, 12)}-${filename}`;
+  await env.UPLOADS_BUCKET.put(r2Key, bytes, {
+    httpMetadata: { contentType: "text/plain" },
+    customMetadata: { filename, store: STORE.storeNumber, kind: "eod" },
+  });
+  const uploadId = await createUpload(env, { filename, r2Key, contentHash: hash, sizeBytes: bytes.byteLength }, "eod");
+
+  try {
+    const parsed = parseEodFile(bytes, filename);
+    if (parsed.rows.length === 0) {
+      await markUploadError(env, uploadId, parsed.warnings.join(" ") || "No movement rows parsed.");
+      return json({ status: "parsed_empty", uploadId, format: parsed.format, warnings: parsed.warnings }, 422);
+    }
+
+    // Replace-on-reload: clear prior EOD rows for the dates this file covers, so a
+    // re-export of the same week replaces it instead of double-counting.
+    const dates = [...new Set(parsed.rows.map((r) => r.date).filter((d): d is string => !!d))];
+    await deleteEodByDates(env, dates);
+
+    const inserted = await insertEodMovements(env, uploadId, parsed.rows);
+    await markUploadParsed(env, uploadId, parsed.format, inserted, parsed.skippedDcClaims);
+
+    const period = parseFilenamePeriod(filename);
+    if (period) {
+      await env.DB.prepare(`UPDATE uploads SET report_date=?, report_date_to=? WHERE id=?`)
+        .bind(period.from, period.to, uploadId)
+        .run();
+    }
+
+    // Re-evaluate the settlement ledger (GR ↔ statement) after every EOD ingest.
+    const settlement = await recomputeSettlement(env);
+
+    return json({
+      status: "parsed",
+      uploadId,
+      filename,
+      format: parsed.format,
+      mappedColumns: parsed.headerMap,
+      rowsIngested: inserted,
+      rawRows: parsed.rawRows,
+      skippedDcClaims: parsed.skippedDcClaims,
+      // self-check totals — eyeball against SAP.
+      selfCheck: {
+        grCount: parsed.grCount,
+        grValInTotal: parsed.grValInTotal,
+        returnCount: parsed.returnCount,
+        returnValTotal: parsed.returnValTotal,
+        reversalCount: parsed.reversalCount,
+      },
+      settlement,
+      warnings: parsed.warnings,
+    });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    const stack = err instanceof Error ? err.stack : undefined;
+    await markUploadError(env, uploadId, message);
+    return json({ status: "error", uploadId, error: message, stack }, 500);
   }
 }
 
@@ -2055,6 +2138,9 @@ async function handleStatementUpload(req: Request, env: Env): Promise<Response> 
     .bind(parsed.header.statement_no)
     .first<{ chain_status: string; chain_gap: number | null }>();
 
+  // Re-evaluate the settlement ledger (GR ↔ statement) — best-effort.
+  try { await recomputeSettlement(env); } catch { /* ledger recompute is non-fatal */ }
+
   return json({
     statement_no: parsed.header.statement_no,
     rowCount: parsed.lines.length,
@@ -2313,7 +2399,10 @@ export default {
       if (path === "/api/uploads" && m === "POST") return await handleUpload(req, env);
       if (path === "/api/uploads" && m === "GET") return await handleListUploads(env);
       if (path === "/api/gr-uploads" && m === "POST") return await handleGrUpload(req, env);
+      if (path === "/api/eod-uploads" && m === "POST") return await handleEodUpload(req, env);
       if (path === "/api/statement-uploads" && m === "POST") return await handleStatementUpload(req, env);
+      if (path === "/api/settlement" && m === "GET") return await handleSettlement(req, env);
+      if (path === "/api/settlement/liv" && m === "GET") return await handleSettlementLiv(req, env);
       if (path === "/api/statements" && m === "GET") return await handleListStatements(env);
       if (path === "/api/reconcile/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
