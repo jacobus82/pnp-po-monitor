@@ -892,6 +892,19 @@ function dashLoadDivPerf(from,to){
       }).join("")+'</div>';
   }).catch(function(){var el=$("divperf");if(el)el.innerHTML='<div class="muted small">Division performance unavailable.</div>'});
 }
+// PnP Account tile: current balance + next payment due + overdue badge (Brief 6).
+function dashLoadPnpAcct(){
+  var el=$("pnpAcctBody");if(!el)return;
+  api("/api/statements/dashboard").then(function(d){
+    var pay=d.payments||{},lt=d.latest||{};var nx=pay.next;
+    var asat=$("pnpAcctAsAt");if(asat)asat.textContent=lt.code?("as at "+lt.code):"";
+    var od=(pay.overdue||[]).length;
+    var bal='<div class="mc-row"><span class="mc-l">Current balance</span><span class="mc-v" style="font-weight:800">'+Rr0(lt.closing||0)+' <span class="small muted" style="font-weight:400">'+(lt.balanceSource==="PRINTED"?"printed":"derived")+'</span></span></div>';
+    var nextr=nx?'<div class="mc-row"><span class="mc-l">Next payment \\u00b7 '+esc(nx.dueDate)+'</span><span class="mc-v" style="font-weight:700;color:var(--nav)">'+Rr0(nx.totalDue)+'</span></div>':'';
+    var odr=od?'<div class="mc-row"><span class="mc-l"><span class="pill OVER">OVERDUE</span> '+od+' stmt</span><span class="mc-v neg" style="font-weight:700">'+Rr0(pay.totalOverdue||0)+'</span></div>':'<div class="mc-row"><span class="mc-l">Overdue</span><span class="mc-v pos">none</span></div>';
+    el.innerHTML='<div class="mlist">'+bal+nextr+odr+'</div>';
+  }).catch(function(){var el=$("pnpAcctBody");if(el)el.innerHTML='<div class="muted small">Account data unavailable.</div>'});
+}
 // Cash-flow forecast tile: PnP corporate payments (left) + Vencor/meat (right).
 function dashLoadCashflow(){
   var el=$("cashflowBody");if(!el)return;
@@ -972,6 +985,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
 
   // ---- CASH FLOW FORECAST ----
   h+='<div class="dash-sec">Cash Flow Forecast</div>';
+  h+='<div class="card clik" onclick="location.hash=\\'#cash\\'" title="Open PnP Account statement dashboard"><h2>PnP Account <span id="pnpAcctAsAt" class="muted small" style="text-transform:none;letter-spacing:0"></span></h2><div id="pnpAcctBody"><div class="muted small">Loading\\u2026</div></div></div>';
   h+='<div class="card clik" onclick="location.hash=\\'#cash\\'" title="Open Cash &amp; Creditors"><h2>Cash flow forecast</h2><div id="cashflowBody"><div class="muted small">Loading\\u2026</div></div></div>';
 
   // ---- OPEN ANOMALIES ----
@@ -991,7 +1005,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   DASH_DIV_LOADED=false;
   dashLoadTiles();
   dashRiskBanner();
-  dashLoadCashflow();
+  dashLoadCashflow();dashLoadPnpAcct();
   // Customer-count widget (calendar yesterday / week-to-date / month-to-date).
   api("/api/customer-counts/summary").then(function(cc){
     function ccDate(s){var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var p=String(s||"").split("-");return p.length===3?(+p[2])+" "+M[(+p[1])-1]+" "+p[0]:(s||"")}
@@ -2282,48 +2296,124 @@ function reconLoad(c){api("/api/reconciliation?status=unmatched-po&limit=2000").
     +'<div class="card" style="margin-top:14px"><h2>Unmatched GR Lines \\u2014 received, no matching PO ('+(d.unmatchedGr||[]).length+')</h2><div class="legend" style="margin-bottom:8px">GR export carries no vendor; match is by PO number + article.</div>'+t2+'</div>';
 }).catch(function(e){c.innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
 
-PAGES.cash=function(){loading();api("/api/creditors").then(function(d){
-  var st=d.statements||[];
-  var trend=st.slice().reverse().map(function(s){return {label:s.week_start,value:(s.closing_cents||0)/100}});
-  var today=new Date().toISOString().slice(0,10);var wb=weekBounds(today);
-  var form='<div class="card"><h2>Weekly statement entry</h2><div class="cards g3">'
-    +'<div><label class="small muted">Week start (Mon)</label><input class="inp" id="cs_ws" type="date" value="'+wb[0]+'" style="width:100%"></div>'
-    +'<div><label class="small muted">Week end (Sun)</label><input class="inp" id="cs_we" type="date" value="'+wb[1]+'" style="width:100%"></div>'
-    +'<div><label class="small muted">Due date (auto: Sun + PnP terms)</label><input class="inp" id="cs_due" type="date" style="width:100%"></div>'
-    +'<div><label class="small muted">Opening balance (R)</label><input class="inp" id="cs_open" type="number" step="0.01" style="width:100%"></div>'
-    +'<div><label class="small muted">Purchases (R)</label><input class="inp" id="cs_pur" type="number" step="0.01" style="width:100%"></div>'
-    +'<div><label class="small muted">Credits (R)</label><input class="inp" id="cs_cr" type="number" step="0.01" style="width:100%"></div>'
-    +'<div><label class="small muted">Closing balance (R)</label><input class="inp" id="cs_close" type="number" step="0.01" style="width:100%"></div>'
-    +'</div><div style="margin-top:10px"><button class="btn" onclick="saveCreditor()">Save statement</button> <span id="cs_msg" class="small muted"></span></div></div>';
-  var uploadCard='<div class="card" style="margin-top:14px"><h2>Account statement upload</h2>'
-    +'<div class="small muted" style="margin-bottom:8px">Upload the native pipe-delimited statement CSV, or the printed account-statement PDF. PDFs are parsed and validated in your browser, then posted as data \\u2014 the server never parses PDFs. Re-uploading the native CSV replaces a PDF load; a PDF will not overwrite a native load.</div>'
+// ===== Statement dashboard chart helpers (Brief 6) =====
+var CREDIT_COLORS={swell:"#2E6CA8",bonusBuy:"#6BA3D6",rebate:"#2E7D32",loyalty:"#8E44AD",promoFunding:"#d97706",otherCredit:"#9aa4ae"};
+var CREDIT_LABELS={swell:"Swell",bonusBuy:"Bonus Buy",rebate:"Rebate (Sally/Tally)",loyalty:"Loyalty",promoFunding:"Promo/Funding",otherCredit:"Other credit"};
+// Balance trend: line across all weeks; PRINTED anchors as filled diamonds, derived as small dots.
+function svgBalanceTrend(weekly){
+  var pts=weekly.filter(function(w){return w.closing!=null}).map(function(w){return {code:w.code,v:w.closing,src:w.balanceSource,ws:w.weekStart}});
+  if(pts.length<2)return '<div class="muted small">Not enough balance points.</div>';
+  var W=920,H=260,pad=54,n=pts.length;
+  var vs=pts.map(function(p){return p.v});var mx=Math.max.apply(null,vs),mn=Math.min.apply(null,vs);var sp=mx-mn||1;mn-=sp*0.1;mx+=sp*0.1;
+  function X(i){return pad+i*(W-2*pad)/(n-1)}function Y(v){return H-pad-((v-mn)/(mx-mn))*(H-2*pad)}
+  var line='<polyline points="'+pts.map(function(p,i){return X(i).toFixed(1)+","+Y(p.v).toFixed(1)}).join(" ")+'" fill="none" stroke="#2E6CA8" stroke-width="2"/>';
+  var dots=pts.map(function(p,i){var x=X(i),y=Y(p.v);if(p.src==="PRINTED")return '<rect x="'+(x-4).toFixed(1)+'" y="'+(y-4).toFixed(1)+'" width="8" height="8" transform="rotate(45 '+x.toFixed(1)+' '+y.toFixed(1)+')" fill="#BE1D37"><title>'+esc(p.code)+" (printed): "+Rr(p.v)+'</title></rect>';return '<circle cx="'+x.toFixed(1)+'" cy="'+y.toFixed(1)+'" r="2" fill="#2E6CA8"><title>'+esc(p.code)+": "+Rr(p.v)+'</title></circle>'}).join("");
+  var step=Math.max(1,Math.ceil(n/9));
+  var xl=pts.map(function(p,i){if(i%step!==0&&i!==n-1)return "";return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(p.code)+'</text>'}).join("");
+  var yax='<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+Rr0(mx)+'</text><text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">'+Rr0(mn)+'</text>';
+  var legend='<div class="small" style="margin-bottom:4px"><span style="color:#BE1D37">\\u25C6 printed</span> &nbsp; <span style="color:#2E6CA8">\\u25CF derived</span></div>';
+  return legend+'<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+line+dots+yax+xl+'</svg></div>';
+}
+// Purchases (bars) with credits-as-%-of-purchases (line overlay, right axis).
+function svgPurchCredit(weekly){
+  var rows=weekly.filter(function(w){return w.purchases>0});if(rows.length<2)return '<div class="muted small">No purchase data.</div>';
+  var W=920,H=260,pad=54,n=rows.length,bw=(W-2*pad)/n*0.6;
+  var mx=Math.max.apply(null,rows.map(function(w){return w.purchases}))||1;
+  var rmax=Math.max.apply(null,rows.map(function(w){return w.fundingRatePct||0}))||1;
+  function X(i){return pad+i*(W-2*pad)/n+((W-2*pad)/n-bw)/2}function Y(v){return H-pad-(v/mx)*(H-2*pad)}function YR(v){return H-pad-(v/rmax)*(H-2*pad)}
+  var bars=rows.map(function(w,i){var x=X(i),y=Y(w.purchases);return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+(H-pad-y).toFixed(1)+'" fill="#6BA3D6" rx="2"><title>'+esc(w.code)+' purchases '+Rr0(w.purchases)+' \\u00b7 credits '+Rr0(-w.credits)+' ('+(w.fundingRatePct||0)+'%)</title></rect>'}).join("");
+  var lpts=rows.map(function(w,i){return (X(i)+bw/2).toFixed(1)+","+YR(w.fundingRatePct||0).toFixed(1)}).join(" ");
+  var line='<polyline points="'+lpts+'" fill="none" stroke="#2E7D32" stroke-width="2"/>'+rows.map(function(w,i){return '<circle cx="'+(X(i)+bw/2).toFixed(1)+'" cy="'+YR(w.fundingRatePct||0).toFixed(1)+'" r="2.5" fill="#2E7D32"><title>'+(w.fundingRatePct||0)+'%</title></circle>'}).join("");
+  var step=Math.max(1,Math.ceil(n/9));
+  var xl=rows.map(function(w,i){if(i%step!==0&&i!==n-1)return "";return '<text x="'+(X(i)+bw/2).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(w.code)+'</text>'}).join("");
+  var legend='<div class="small" style="margin-bottom:4px"><span style="color:#6BA3D6">\\u25A0 purchases</span> &nbsp; <span style="color:#2E7D32">\\u25CF credits % of purchases (funding rate)</span></div>';
+  return legend+'<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+bars+line+'<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+Rr0(mx)+'</text><text x="'+(W-pad+6)+'" y="'+(pad+4)+'" font-size="10" fill="#2E7D32" text-anchor="start">'+Math.round(rmax)+'%</text>'+xl+'</svg></div>';
+}
+// Stacked credit decomposition by bucket (all credits are negative -> plot magnitudes).
+function svgStackedCredits(weekly,buckets){
+  var rows=weekly.filter(function(w){var t=0;buckets.forEach(function(b){t+=Math.abs(w.buckets[b]||0)});return t>0});
+  if(rows.length<2)return '<div class="muted small">No credit data.</div>';
+  var W=920,H=280,pad=54,n=rows.length,bw=(W-2*pad)/n*0.7;
+  var totals=rows.map(function(w){var t=0;buckets.forEach(function(b){t+=Math.abs(w.buckets[b]||0)});return t});
+  var mx=Math.max.apply(null,totals)||1;
+  function X(i){return pad+i*(W-2*pad)/n+((W-2*pad)/n-bw)/2}function H2(v){return (v/mx)*(H-2*pad)}
+  var bars=rows.map(function(w,i){var x=X(i),yb=H-pad;var seg="";buckets.forEach(function(b){var v=Math.abs(w.buckets[b]||0);if(v<=0)return;var h=H2(v);yb-=h;seg+='<rect x="'+x.toFixed(1)+'" y="'+yb.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+h.toFixed(1)+'" fill="'+CREDIT_COLORS[b]+'" data-drill="cash?week='+esc(w.code)+'&type='+bmap(b)+'" style="cursor:pointer"><title>'+esc(w.code)+" "+CREDIT_LABELS[b]+" "+Rr0(v)+'</title></rect>'});return seg}).join("");
+  var step=Math.max(1,Math.ceil(n/9));
+  var xl=rows.map(function(w,i){if(i%step!==0&&i!==n-1)return "";return '<text x="'+(X(i)+bw/2).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(w.code)+'</text>'}).join("");
+  var legend='<div class="small" style="margin-bottom:4px">'+buckets.map(function(b){return '<span style="color:'+CREDIT_COLORS[b]+'">\\u25A0 '+CREDIT_LABELS[b]+'</span>'}).join(" &nbsp; ")+'</div>';
+  return legend+'<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+bars+'<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+Rr0(mx)+'</text>'+xl+'</svg></div>';
+}
+// bucket key -> statement line_type for the drill filter.
+function bmap(b){return {swell:"SWELL",bonusBuy:"BONUS_BUY",rebate:"REBATE",loyalty:"LOYALTY",promoFunding:"FUNDING",otherCredit:"CREDIT_NOTE"}[b]||""}
+
+PAGES.cash=function(){var rp=routeParams();loading();api("/api/statements/dashboard").then(function(d){
+  var pay=d.payments||{},weekly=d.weekly||[],buckets=d.creditBuckets||[];
+  var nx=pay.next;
+  // ---- Payments due panel ----
+  var nextCard=nx?'<div class="card kpi" style="border-left:4px solid var(--nav)"><div class="l">Next payment due</div><div class="v">'+Rr(nx.totalDue)+'</div><div class="sub">'+esc(nx.code)+' \\u00b7 due '+esc(nx.dueDate)+'</div></div>':'<div class="card kpi"><div class="l">Next payment due</div><div class="v">\\u2014</div></div>';
+  var odCard='<div class="card kpi'+((pay.overdue||[]).length?' ':'')+'"><div class="l">Overdue</div><div class="v"><span class="'+((pay.overdue||[]).length?"neg":"")+'">'+Rr((pay.totalOverdue||0))+'</span></div><div class="sub">'+((pay.overdue||[]).length)+' statement(s) past due, payment window loaded</div></div>';
+  var outCard='<div class="card kpi"><div class="l">Total outstanding</div><div class="v">'+Rr(pay.totalOutstanding||0)+'</div><div class="sub">unpaid obligations (FIFO-reconciled)</div></div>';
+  var balCard='<div class="card kpi clik" onclick="location.hash=\\'#cash\\'"><div class="l">Account balance</div><div class="v">'+Rr((d.latest&&d.latest.closing)||0)+'</div><div class="sub">'+esc((d.latest&&d.latest.code)||"")+' closing \\u00b7 '+((d.latest&&d.latest.balanceSource)==="PRINTED"?"printed":"derived")+'</div></div>';
+  var sched=(pay.schedule||[]).concat(pay.overdue||[]);
+  var schedTbl='<div class="card" style="margin-top:14px"><h2>Payment schedule <span class="muted small">unpaid obligations</span></h2>'
+    +(sched.length?'<div class="tablewrap"><table><thead><tr><th>Statement</th><th>Due date</th><th class="num">Amount</th><th>Status</th></tr></thead><tbody>'
+    +sched.slice().sort(function(a,b){return String(a.dueDate).localeCompare(String(b.dueDate))}).map(function(s){var od=s.status==="OVERDUE";return '<tr data-drill="cash?week='+esc(s.code)+'"><td class="small">'+esc(s.code)+'</td><td class="small">'+esc(s.dueDate)+'</td><td class="num">'+Rr(s.totalDue)+'</td><td class="small '+(od?"neg":"muted")+'">'+esc(s.status)+'</td></tr>'}).join("")
+    +'</tbody></table></div>':'<div class="muted small">No unpaid obligations.</div>')+'</div>';
+
+  var h='<div class="cards kpis">'+nextCard+outCard+odCard+balCard+'</div>'+schedTbl;
+  // ---- Charts ----
+  h+='<div class="card" style="margin-top:14px"><h2>Account balance trend <span class="muted small">closing per week, all '+weekly.length+' statements</span></h2>'+svgBalanceTrend(weekly)+'</div>';
+  h+='<div class="card" style="margin-top:14px"><h2>Purchases &amp; funding rate <span class="muted small">credits as % of purchases</span></h2>'+svgPurchCredit(weekly)+'</div>';
+  h+='<div class="card" style="margin-top:14px"><h2>Credits decomposition <span class="muted small">by type \\u00b7 click a segment to drill</span></h2>'+svgStackedCredits(weekly,buckets)+'</div>';
+  // Fixed charges + interest
+  var fc=d.fixedCharges||[];var fcLatest=fc[fc.length-1]||{};
+  h+='<div class="cards g2" style="margin-top:14px"><div class="card"><h2>Fixed charges <span class="muted small">per month</span></h2>'
+    +'<div class="cards kpis">'+kpi("Franchise fee",Rr0(fcLatest.franchiseFee||0),"latest "+(fcLatest.month||""))+kpi("Loyalty",Rr0(-(fcLatest.loyalty||0)),"credit \\u00b7 "+(fcLatest.month||""))+'</div>'
+    +'<div class="tablewrap" style="max-height:200px;overflow:auto;margin-top:8px"><table><thead><tr><th>Month</th><th class="num">Franchise fee</th><th class="num">Loyalty</th></tr></thead><tbody>'+fc.slice().reverse().map(function(m){return '<tr><td class="small">'+esc(m.month)+'</td><td class="num">'+Rr0(m.franchiseFee)+'</td><td class="num">'+Rr0(m.loyalty)+'</td></tr>'}).join("")+'</tbody></table></div></div>';
+  // Interest flag
+  var intr=d.interest||[];
+  h+='<div class="card"><h2>Interest charged <span class="muted small">should be zero</span></h2>'
+    +(intr.length?'<div class="small neg" style="margin-bottom:6px">\\u26A0 '+intr.length+' interest line(s) found:</div><div class="tablewrap"><table><tbody>'+intr.map(function(i){return '<tr data-drill="cash?week='+esc(i.code)+'&q=interest"><td class="small">'+esc(i.code)+'</td><td class="small">'+esc(i.week)+'</td><td class="num neg">'+Rr(i.amount)+'</td></tr>'}).join("")+'</tbody></table></div>':'<div class="small pos">No interest charged. \\uD83C\\uDF89</div>')+'</div></div>';
+  // Swell by dept
+  var sw=d.swell||{};var swWeeks=(sw.weeks||[]).slice(-8);var depts=sw.expectedDepts||[];
+  h+='<div class="card" style="margin-top:14px"><h2>Swell by department <span class="muted small">last 8 weeks \\u00b7 '+((sw.gaps||[]).length)+' week(s) with a missing dept</span></h2>'
+    +(swWeeks.length?'<div class="tablewrap"><table><thead><tr><th>Week</th>'+depts.map(function(dp){return '<th class="num">'+esc(dp)+'</th>'}).join("")+'</tr></thead><tbody>'
+    +swWeeks.slice().reverse().map(function(wk){return '<tr><td class="small">'+esc(wk.code)+'</td>'+depts.map(function(dp){var v=wk.byDept[dp];return '<td class="num'+(v==null?" neg":"")+'">'+(v==null?"\\u2014":Rr0(-v))+'</td>'}).join("")+'</tr>'}).join("")
+    +'</tbody></table></div><div class="legend">Values are swell rebate magnitudes; \\u2014 (red) = expected dept absent that week (rebate completeness flag).</div>':'<div class="muted small">No swell data.</div>')+'</div>';
+  // ---- Line browser ----
+  h+='<div class="card" style="margin-top:14px" id="stmtBrowseCard"><h2>Statement line browser</h2><div id="stmtBrowse"></div></div>';
+  // Upload + balance-chain detail (kept)
+  h+='<div class="card" style="margin-top:14px"><h2>Account statement upload</h2>'
+    +'<div class="small muted" style="margin-bottom:8px">Upload the native pipe-delimited statement CSV, or the printed account-statement PDF (parsed in your browser).</div>'
     +'<input type="file" id="stmt-file" accept=".csv,.pdf" class="inp"> <span id="stmt_msg" class="small muted"></span></div>';
-  var chart='<div class="card" style="margin-top:14px"><h2>Closing balance trend</h2>'+lineChart(trend)+'</div>';
-  var riskCard='<div class="card" style="margin-top:14px"><h2>Upcoming payment risk \\u2014 next 8 weeks</h2><div id="cashRisk"><div class="muted small">Loading\\u2026</div></div></div>';
-  var tbl='<div class="card" style="margin-top:14px"><h2>Statements</h2>'+makeTable([{key:"week_start",label:"Week start"},{key:"week_end",label:"Week end"},{key:"opening_cents",label:"Opening",num:true,fmt:R},{key:"purchases_cents",label:"Purchases",num:true,fmt:R},{key:"credits_cents",label:"Credits",num:true,fmt:R},{key:"closing_cents",label:"Closing",num:true,fmt:R},{key:"due_date",label:"Due"}],st,{rowMenu:false,search:false})+'</div>';
-  var detailCard='<div class="card" style="margin-top:14px"><h2>Statements \\u2014 weekly balance chain</h2><div id="stmtDetail"><div class="muted small">Loading\\u2026</div></div></div>';
-  setHTML(form+uploadCard+riskCard+chart+tbl+detailCard);
+  h+='<div class="card" style="margin-top:14px"><h2>Statements \\u2014 weekly balance chain</h2><div id="stmtDetail"><div class="muted small">Loading\\u2026</div></div></div>';
+  setHTML(h);
   var fi=$("stmt-file");if(fi)fi.addEventListener("change",onStmtFile);
   loadStatementDetail();
-  // auto due date from settings
-  api("/api/settings").then(function(s){var pnp=Number((s.settings||{}).pnp_terms_days||28);var due=new Date(wb[1]+"T00:00:00Z");due.setUTCDate(due.getUTCDate()+pnp);$("cs_due").value=due.toISOString().slice(0,10)});
-  // upcoming payment risk
-  api("/api/creditor-payments?weeks=8").then(function(cp){var el=$("cashRisk");if(!el)return;
-    el.innerHTML=makeTable([
-      {key:"weekEnding",label:"Week ending"},
-      {key:"flags",label:"Risk flags",html:function(r){return (r.flags&&r.flags.length)?r.flags.map(function(f){return '<span class="pill '+(r.severity==="CRITICAL"?"OVER":"TIGHT")+'">'+esc(f)+'</span>'}).join(" "):'<span class="muted">\\u2014</span>'}},
-      {key:"estCreditorPmtZar",label:"Est. creditor pmt",num:true,fmt:function(v){return v?Rr0(v):"\\u2014"}},
-      {key:"salaryOutZar",label:"Salary out",num:true,html:function(r){return r.salaryOutZar!=null?Rr0(r.salaryOutZar):'<span class="muted">\\u2014</span>'}},
-      {key:"netCashRisk",label:"Net cash risk",html:function(r){var s=r.netCashRisk;return s==="CRITICAL"?'<span class="neg">CRITICAL</span>':s==="HIGH"?'<span style="color:var(--orange);font-weight:600">HIGH</span>':'<span class="muted">\\u2014</span>'}}
-    ],cp.weeks||[],{search:false,rowMenu:false})
-    +(cp.monthlySalaryZar==null?'<div class="small muted" style="margin-top:6px">Set "Monthly salary cost" in Settings to populate the Salary out column.</div>':"");
-  }).catch(function(){var el=$("cashRisk");if(el)el.innerHTML='<div class="muted small">Risk data unavailable.</div>'});
+  // browser: honor a drill (week/type/q) or default to latest statement.
+  stmtBrowse({statement:rp.week||((d.latest&&d.latest.code)||""),type:rp.type||"",q:rp.q||""});
 }).catch(errBox)};
-function saveCreditor(){
-  function c(id){return Math.round((Number($(id).value)||0)*100)}
-  var body={week_start:$("cs_ws").value,week_end:$("cs_we").value,due_date:$("cs_due").value,opening_cents:c("cs_open"),purchases_cents:c("cs_pur"),credits_cents:c("cs_cr"),closing_cents:c("cs_close")};
-  adminSend("/api/creditors","POST",body).then(function(){$("cs_msg").textContent="Saved.";PAGES.cash()}).catch(function(e){$("cs_msg").textContent="Error: "+(e&&e.message||e)});
+function stmtBrowse(f){
+  var el=$("stmtBrowse");if(!el)return;el.innerHTML='<div class="loading">Loading\\u2026</div>';
+  window._stmtF=f||{};
+  var qs=[];if(f.statement)qs.push("statement="+encodeURIComponent(f.statement));if(f.from)qs.push("from="+f.from);if(f.to)qs.push("to="+f.to);if(f.type)qs.push("type="+encodeURIComponent(f.type));if(f.vendor)qs.push("vendor="+encodeURIComponent(f.vendor));if(f.q)qs.push("q="+encodeURIComponent(f.q));if(f.sort)qs.push("sort="+f.sort);if(f.dir)qs.push("dir="+f.dir);
+  api("/api/statements/lines?"+qs.join("&")).then(function(d){
+    var fl=d.filters||{};
+    var bar='<div class="toolbar" style="gap:8px;flex-wrap:wrap">'
+      +'<input class="inp" id="sbStmt" placeholder="Statement (e.g. 202717)" value="'+esc(fl.statement||"")+'" style="width:150px">'
+      +'<select class="sel" id="sbType"><option value="">All types</option>'+["INVOICE","PAYMENT","SWELL","BONUS_BUY","REBATE","LOYALTY","PROMO","FUNDING","CREDIT_NOTE","INVOICE_REDUCTION","FRANCHISE_FEE","OTHER"].map(function(t){return '<option'+(fl.type===t?" selected":"")+'>'+t+'</option>'}).join("")+'</select>'
+      +'<input class="inp" id="sbQ" placeholder="Search text\\u2026" value="'+esc(fl.q||"")+'" style="width:160px">'
+      +'<button class="btn" onclick="stmtBrowseApply()">Apply</button></div>';
+    var subs='<div class="small muted" style="margin:6px 0">'+d.lineCount+' lines \\u00b7 net '+Rr(d.total)+' \\u00b7 '+(d.subtotals||[]).map(function(s){return esc(s.line_type)+" "+Rr0(s.amt)+" ("+s.n+")"}).join(" \\u00b7 ")+'</div>';
+    var tbl=makeTable([
+      {key:"statement_no",label:"Stmt"},{key:"cut_off",label:"Week end"},{key:"doc_number",label:"Doc"},
+      {key:"line_type",label:"Type"},{key:"vendor_name",label:"Vendor",html:function(r){return esc(r.vendor_name||r.vendor_text||"")}},
+      {key:"vendor_text",label:"Text",cls:"desc"},{key:"amount",label:"Amount",num:true,fmt:Rr}
+    ],d.lines||[],{search:false,rowMenu:false});
+    el.innerHTML=bar+subs+tbl;
+  }).catch(function(e){el.innerHTML='<div class="err">'+esc(e&&e.message||e)+'</div>'});
 }
+function stmtBrowseApply(){stmtBrowse({statement:$("sbStmt").value.trim(),type:$("sbType").value,q:$("sbQ").value.trim()});}
 // pdf.js loads lazily from cdnjs only when a PDF is actually chosen, so the CSV
 // path costs nothing. Both formats converge on POST /api/statement-uploads.
 var STMT_PDFJS="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.10.38/pdf.min.mjs";
