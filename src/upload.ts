@@ -163,6 +163,26 @@ export const UPLOAD_HTML = /* html */ `<!doctype html>
       <div class="result" aria-live="polite"></div>
     </section>
 
+    <section class="card" data-kind="eod">
+      <h2>EOD Movements</h2>
+      <p class="fmt">Weekly End-of-Day Movements Report — goods receipts, returns &amp; LIV settlement.
+        Accepts <code>.txt</code> (tab-delimited) or <code>.htm</code> — <strong>any SAP export
+        filename accepted, no renaming needed.</strong> Powers the Settlement (GR&nbsp;&#8596;&nbsp;statement) screen.</p>
+      <div class="zone" tabindex="0" role="button"
+           aria-label="EOD movements drop zone. Drag a file here, or press Enter to browse.">
+        <div class="ic" aria-hidden="true">&#128184;</div>
+        <div class="big"><span class="mob">Tap to </span><span class="desk">Drag &amp; drop or </span><span class="link">browse</span><span class="mob"> files</span></div>
+        <div class="hint">.txt / .htm</div>
+      </div>
+      <input type="file" class="file sr" multiple accept=".txt,.htm,.html,text/plain" aria-hidden="true" tabindex="-1" />
+      <div class="last">Last upload: <span class="last-val"><b>—</b></span></div>
+      <div class="progress" hidden role="status" aria-live="polite">
+        <div class="ptext">Uploading&hellip;</div>
+        <div class="bar2" role="progressbar" aria-valuemin="0" aria-valuemax="100"><i></i></div>
+      </div>
+      <div class="result" aria-live="polite"></div>
+    </section>
+
     <section class="card" data-kind="fim">
       <h2>FIM Report</h2>
       <p class="fmt">Daily / weekly / monthly department financials. Accepts <code>.xlsx</code> or <code>.csv</code>
@@ -298,7 +318,7 @@ export const UPLOAD_HTML = /* html */ `<!doctype html>
 </main>
 
 <script>
-const ENDPOINTS = { sap: "/api/uploads", gr: "/api/gr-uploads", fim: "/api/fim-uploads", cc: "/api/customer-uploads", fs: "/api/fan-score-uploads" };
+const ENDPOINTS = { sap: "/api/uploads", gr: "/api/gr-uploads", eod: "/api/eod-uploads", fim: "/api/fim-uploads", cc: "/api/customer-uploads", fs: "/api/fan-score-uploads" };
 const DB_KIND   = { sap: "po", gr: "gr", fim: "fim", cc: "cc", fs: "fs" };
 const esc = s => String(s == null ? "" : s).replace(/[&<>]/g, m => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[m]));
 const rand = v => "R" + (v == null ? 0 : v).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -307,7 +327,7 @@ const fmtWhen = s => s ? esc(String(s).replace("T", " ").replace("Z", "")) : "�
 function cardOf(kind) { return document.querySelector('section[data-kind="' + kind + '"]'); }
 
 // --- wire each tile -------------------------------------------------------
-for (const kind of ["sap", "gr", "fim", "cc", "fs"]) {
+for (const kind of ["sap", "gr", "eod", "fim", "cc", "fs"]) {
   const card = cardOf(kind);
   const zone = card.querySelector(".zone");
   const input = card.querySelector(".file");
@@ -379,7 +399,7 @@ async function runBatch(kind, files, ui) {
   ui.result.innerHTML = "";
   ui.prog.hidden = false;
   ui.bar.classList.remove("indet");
-  var ok = 0, fail = [], skip = [], dates = [];
+  var ok = 0, fail = [], skip = [], dates = [], eodCheck = null;
   for (var i = 0; i < files.length; i++) {
     var f = files[i];
     ui.fill.style.width = Math.round((i / files.length) * 100) + "%";
@@ -401,6 +421,7 @@ async function runBatch(kind, files, ui) {
         var dt = data.dateFrom || data.reportDate;
         if (dt) dates.push(dt);
         if (data.dateTo && data.dateTo !== dt) dates.push(data.dateTo);
+        if (kind === "eod" && data.selfCheck) eodCheck = { c: data.selfCheck, s: data.settlement };
       } else {
         var reason = data.error || (data.warnings && data.warnings.join(" ")) || ("HTTP " + resp.status);
         fail.push({ name: f.name, reason: reason });
@@ -409,17 +430,22 @@ async function runBatch(kind, files, ui) {
   }
   ui.fill.style.width = "100%";
   ui.prog.hidden = true;
-  renderBatchSummary(ui.result, kind, ok, fail, skip, dates);
+  renderBatchSummary(ui.result, kind, ok, fail, skip, dates, eodCheck);
   loadLast();
   loadHistory();
 }
 
-function renderBatchSummary(el, kind, ok, fail, skip, dates) {
-  var KIND = { sap: "PO", gr: "GR", fim: "FIM", cc: "CC", fs: "FS" };
+function renderBatchSummary(el, kind, ok, fail, skip, dates, eodCheck) {
+  var KIND = { sap: "PO", gr: "GR", eod: "EOD", fim: "FIM", cc: "CC", fs: "FS" };
   var range = "";
   if (dates.length) { dates.sort(); range = " (" + dates[0] + " \\u2192 " + dates[dates.length - 1] + ")"; }
   var h = '<div class="bsum">';
   h += '<div class="ok">\\u2705 ' + KIND[kind] + ": " + ok + " file" + (ok === 1 ? "" : "s") + " loaded" + esc(range) + "</div>";
+  if (eodCheck && eodCheck.c) {
+    var c = eodCheck.c, R = function (n) { return "R" + Number(n || 0).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); };
+    h += '<div class="ok" style="font-weight:400">Self-check: <b>' + c.grCount + '</b> goods receipts totalling <b>' + R(c.grValInTotal) + '</b> \\u00b7 ' + c.returnCount + ' returns (' + R(c.returnValTotal) + ')' + (c.reversalCount ? ' \\u00b7 ' + c.reversalCount + ' reversal' : '') + '</div>';
+    if (eodCheck.s) h += '<div class="ok" style="font-weight:400">Settlement re-evaluated \\u2014 open the <a href="/#settlement">Settlement screen</a> for the reconciliation.</div>';
+  }
   if (skip.length) {
     h += '<details class="bskip"><summary>\\u23ED ' + skip.length + " skipped (duplicate)</summary><ul>"
       + skip.map(function (s) { return "<li>" + esc(s.name) + " \\u2014 " + esc(s.reason) + "</li>"; }).join("") + "</ul></details>";
@@ -594,7 +620,7 @@ async function loadLast() {
     const d = await r.json();
     const latest = {};
     for (const u of (d.uploads || [])) { if (u.kind && !latest[u.kind]) latest[u.kind] = u; }
-    for (const kind of ["sap", "gr", "fim", "cc", "fs"]) {
+    for (const kind of ["sap", "gr", "eod", "fim", "cc", "fs"]) {
       const card = cardOf(kind);
       const span = card && card.querySelector(".last-val");
       if (!span) continue;

@@ -295,6 +295,7 @@ var NAV=[
  ["anomalies","\\u26A0","Risk & Anomalies"],
  ["gr","\\uD83D\\uDE9A","Goods Receipts"],
  ["cash","\\uD83D\\uDCB0","Cash & Creditors"],
+ ["settlement","\\uD83D\\uDCB8","Settlement"],
  ["settings","\\u2699","Settings"],
  ["export","\\uD83D\\uDCE4","Export Reports"]
 ];
@@ -303,7 +304,7 @@ var NAV=[
 // per-group in localStorage under "nav-<group id>" (default expanded).
 var NAV_GROUPS=[
  {id:"g-overview",label:"Overview",items:["dashboard","trading","weekly","monthly","fy","customers","fanscore"]},
- {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","open","returns","gr","vendors","cash"]},
+ {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","open","returns","gr","vendors","cash","settlement"]},
  {id:"g-analysis",label:"Analysis",items:["articles","categories","departments","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
  {id:"g-admin",label:"Admin",items:["upload","settings","export"]}
 ];
@@ -2157,6 +2158,67 @@ PAGES.anomalies=function(){
 };
 function ackAnom(e,id){e.stopPropagation();fetch("/api/anomalies/"+id+"/ack",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({resolved:true})}).then(function(){if(window._reloadAnom)window._reloadAnom()})}
 
+// ---- Settlement (#settlement): EOD goods-receipts ↔ statement (LIV) reconciliation ----
+PAGES.settlement=function(){var rp=routeParams();loading();stLoad(rp.week||"");};
+function stLoad(week){
+  api("/api/settlement"+(week?"?week="+encodeURIComponent(week):"")).then(function(d){
+    var t=d.tiles||{},weeks=d.weeks||[];
+    if(!weeks.length){setHTML('<div class="card"><h2>\\uD83D\\uDCB8 Settlement</h2><div class="muted small" style="padding:8px">No EOD movement data yet \\u2014 upload an End-of-Day Movements Report on the Upload page to reconcile goods receipts against statements.</div></div>');return;}
+    var sel='<select class="sel" id="stWeek" onchange="stLoad(this.value)">'+weeks.map(function(w){return '<option value="'+esc(w)+'"'+(w===d.week?" selected":"")+'>'+esc(w)+'</option>'}).join("")+'</select>';
+    var h='<div class="toolbar" style="gap:12px;flex-wrap:wrap"><label class="small muted">Settlement week '+sel+'</label><span class="small muted">EOD goods receipts \\u2194 statement (LIV) \\u00b7 tolerance R5 direct / R2,000 DC</span></div>';
+    h+='<div class="cards kpis" style="margin-top:8px">'
+      +kpi("Matched",Rr0(t.matched.value),num(t.matched.count)+" LIVs billed &amp; received")
+      +kpi("Received, not billed",Rr0(t.receivedNotBilled.value),num(t.receivedNotBilled.count)+" LIVs \\u00b7 "+num(t.receivedNotBilled.aged)+" aged &gt;14d")
+      +kpi("Billed, not received",Rr0(t.billedNotReceived.value),num(t.billedNotReceived.count)+" statement docs")
+      +kpi("Claims (variance)",'<span class="neg">'+Rr0(t.claims.value)+'</span>',num(t.claims.count)+" beyond tolerance")
+      +'</div>';
+    h+='<div class="card" style="margin-top:14px"><h2>Billing variance \\u2014 claims to raise <span class="muted small">GR total vs LIV value, beyond tolerance \\u00b7 click a row for evidence</span></h2>'+stClaimsTable(d.claims||[])+'</div>';
+    h+='<div class="cards g2" style="margin-top:14px">'
+      +'<div class="card"><h2>Received, not billed <span class="muted small">uninvoiced aging</span></h2>'+stUninvoicedTable(d.receivedNotBilled||[])+'</div>'
+      +'<div class="card"><h2>Returns without credit <span class="muted small">DCRC not yet on a statement</span></h2>'+stReturnsTable(d.returnsWithoutCredit||[])+'</div>'
+      +'</div>';
+    h+='<div class="card" style="margin-top:14px"><h2>Billed, not received <span class="muted small">statement LIVs with no EOD goods receipt</span></h2>'+stBilledTable(d.billedNotReceived||[])+'</div>';
+    setHTML(h);
+  }).catch(errBox);
+}
+function stClaimsTable(claims){
+  if(!claims.length)return '<div class="muted small" style="padding:10px">No billing variances beyond tolerance this week.</div>';
+  var rows=claims.map(function(c){
+    var vcls=(c.variance||0)<0?"neg":"pos";
+    return '<tr data-liv="'+esc(c.liv_doc)+'" style="cursor:pointer"><td>'+esc(c.supplier_name||"")+'</td><td class="small">'+esc(c.po_number||"")+'</td><td class="small">'+esc(c.liv_doc)+'</td>'
+      +'<td class="num">'+Rr(c.grTotal)+'</td><td class="num">'+Rr(c.livValue)+'</td><td class="num">'+(c.billed!=null?Rr(c.billed):"\\u2014")+'</td>'
+      +'<td class="num '+vcls+'" style="font-weight:700">'+Rr(c.variance)+'</td><td class="small muted">'+(c.isDirect?"direct":"DC")+'</td></tr>';
+  }).join("");
+  return '<div class="tablewrap"><table><thead><tr><th>Vendor</th><th>PO</th><th>LIV</th><th class="num">GR total</th><th class="num">LIV value</th><th class="num">Billed</th><th class="num">Variance</th><th>Tol</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+}
+function stUninvoicedTable(rows){
+  if(!rows.length)return '<div class="muted small" style="padding:8px">Nothing received-but-unbilled this week.</div>';
+  return '<div class="tablewrap"><table><thead><tr><th>PO</th><th>Supplier</th><th class="num">GR total</th><th>GR date</th><th class="num">Age</th></tr></thead><tbody>'
+    +rows.map(function(r){var aged=(r.status==="AGED");return '<tr'+(r.key&&String(r.key).indexOf("GR:")!==0?' data-liv="'+esc(r.key)+'" style="cursor:pointer"':'')+'><td class="small">'+esc(r.po_number||"")+'</td><td>'+esc(r.supplier_name||"")+'</td><td class="num">'+Rr(r.grTotal)+'</td><td class="small">'+esc(r.grDate||"")+'</td><td class="num '+(aged?"neg":"")+'">'+(r.agingDays!=null?r.agingDays+"d":"\\u2014")+'</td></tr>'}).join("")
+    +'</tbody></table></div>';
+}
+function stReturnsTable(rows){
+  if(!rows.length)return '<div class="muted small" style="padding:8px">All returns have a matching credit. \\uD83C\\uDF89</div>';
+  return '<div class="tablewrap"><table><thead><tr><th>Return doc</th><th>Supplier</th><th class="num">Value</th><th class="num">Age</th><th>Status</th></tr></thead><tbody>'
+    +rows.map(function(r){var aged=(r.status==="AGED");return '<tr><td class="small">'+esc(r.return_doc||"")+'</td><td>'+esc(r.supplier_name||"")+'</td><td class="num">'+Rr(r.returnValue)+'</td><td class="num '+(aged?"neg":"")+'">'+(r.agingDays!=null?r.agingDays+"d":"\\u2014")+'</td><td class="small '+(aged?"neg":"muted")+'">'+esc(r.status||"")+'</td></tr>'}).join("")
+    +'</tbody></table></div>';
+}
+function stBilledTable(rows){
+  if(!rows.length)return '<div class="muted small" style="padding:8px">Every billed LIV this week has a matching EOD receipt.</div>';
+  return '<div class="tablewrap"><table><thead><tr><th>LIV / doc</th><th>Statement</th><th class="num">Billed</th></tr></thead><tbody>'
+    +rows.map(function(r){return '<tr data-liv="'+esc(r.liv_doc)+'" style="cursor:pointer"><td class="small">'+esc(r.liv_doc)+'</td><td class="small">'+esc(r.statement_no||"")+'</td><td class="num">'+Rr(r.billed)+'</td></tr>'}).join("")
+    +'</tbody></table></div>';
+}
+function openSettlementLiv(liv){openModal("LIV "+esc(liv),'<div class="loading">Loading\\u2026</div>');
+  api("/api/settlement/liv?liv="+encodeURIComponent(liv)).then(function(d){
+    var l=d.ledger||{};
+    var head='<div class="cards kpis">'+kpi("GR total",Rr(l.eod_gr_total),num(l.gr_count)+" GR rows")+kpi("LIV value",Rr(l.eod_liv_value),null)+kpi("Billed",l.statement_amount!=null?Rr(l.statement_amount):"\\u2014",esc(l.statement_no||""))+kpi("Variance",'<span class="'+((l.variance_zar||0)<0?"neg":"pos")+'">'+Rr(l.variance_zar)+'</span>',esc(l.status||""))+'</div>';
+    var gr='<div class="card" style="margin-top:12px"><h2>EOD goods-receipt rows <span class="muted small">aggregated to the LIV above</span></h2>'+makeTable([{key:"mvmt_date",label:"Date"},{key:"po_number",label:"PO"},{key:"supplier_name",label:"Supplier"},{key:"gr_val_in",label:"GR Val(In)",num:true,fmt:Rr},{key:"inv_status",label:"Inv"},{key:"gr_liv_var",label:"GR-LIV",num:true,fmt:Rr},{key:"liv_value",label:"LIV value",num:true,fmt:Rr}],d.grRows||[],{search:false,rowMenu:false})+'</div>';
+    var st='<div class="card" style="margin-top:12px"><h2>Statement lines</h2>'+((d.statementLines||[]).length?makeTable([{key:"statement_no",label:"Statement"},{key:"doc_number",label:"Doc (LIV)"},{key:"reference",label:"Reference"},{key:"line_type",label:"Type"},{key:"amount",label:"Amount",num:true,fmt:Rr}],d.statementLines,{search:false,rowMenu:false}):'<div class="muted small">No statement line for this LIV \\u2014 received, not yet billed.</div>')+'</div>';
+    openModal("LIV "+esc(liv)+(l.supplier_name?' <span class="tag">'+esc(l.supplier_name)+'</span>':''),head+gr+st);
+  }).catch(function(e){openModal("LIV "+esc(liv),'<div class="err">'+esc(e&&e.message||e)+'</div>')});
+}
+
 var _grFT={from:"",to:""},_grTab="gr";
 PAGES.gr=function(){
   setHTML(periodPickerHTML("grPer")+'<div class="tabs" id="grtabs"><button class="active" onclick="grTab(\\'gr\\')">Goods Receipts</button><button onclick="grTab(\\'recon\\')">PO Reconciliation</button></div><div id="grtabc"><div class="loading">Loading\\u2026</div></div>');
@@ -2548,6 +2610,8 @@ window.addEventListener("hashchange",go);
 // parent that survives every setHTML re-render). Any element carrying data-drill
 // navigates to its hash route, which the target page reads via routeParams().
 document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-drill]"):null;if(!row)return;var drill=row.getAttribute("data-drill");if(drill){ev.preventDefault();location.hash="#"+drill;}});
+// Settlement drill: a [data-liv] row opens the LIV detail modal (EOD GR rows + statement lines).
+document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-liv]"):null;if(!row)return;var liv=row.getAttribute("data-liv");if(liv)openSettlementLiv(liv);});
 function tick(){var s="Pick n Pay Lydenburg \\u00b7 "+new Date().toLocaleString("en-ZA",{hour12:false});$("clock").textContent=s;var sb=$("subbar");if(sb)sb.textContent=s}
 tick();setInterval(tick,1000);
 // NOTE: the timed auto-refresh that re-ran the current PAGES[hash]() every 60–120s
