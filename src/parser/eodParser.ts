@@ -113,6 +113,8 @@ function extractHtmlRows(html: string): [string[], string[][]] {
       .replace(/&amp;/gi, "&")
       .replace(/&lt;/gi, "<")
       .replace(/&gt;/gi, ">")
+      .replace(/&quot;/gi, '"')
+      .replace(/&#x([0-9a-f]+);/gi, (_m, h) => String.fromCharCode(parseInt(h, 16))) // hex entities, e.g. &#x2f; = "/"
       .replace(/&#(\d+);/g, (_m, d) => String.fromCharCode(Number(d)))
       .replace(/ /g, " ")
       .trim();
@@ -124,13 +126,18 @@ function extractHtmlRows(html: string): [string[], string[][]] {
     if (cells.length) rows.push(cells);
   }
   if (!rows.length) return [[], []];
-  // header = the row that carries "Dept." / "Movement Text"
+  // header = the first row that carries a "Movement Text" / "Mvt Text" cell.
   let hi = 0;
-  for (let i = 0; i < Math.min(rows.length, 8); i++) {
+  for (let i = 0; i < Math.min(rows.length, 12); i++) {
     if (rows[i]!.some((c) => MOVEMENT_HEADER.has(normalizeHeader(c)))) { hi = i; break; }
   }
   const headers = rows[hi]!;
-  const body = rows.slice(hi + 1).filter((r) => r.length === headers.length);
+  // Keep every subsequent row — do NOT filter by exact width. SAP HTML exports
+  // paginate and can emit ragged trailing-cell counts per row; an exact-width
+  // filter silently drops good data. Absolute column indices still resolve
+  // (columnReader guards out-of-range), and buildResult's movement-type filter
+  // rejects footers / repeated header rows.
+  const body = rows.slice(hi + 1).filter((r) => !r.some((c) => MOVEMENT_HEADER.has(normalizeHeader(c))));
   return [headers, body];
 }
 
