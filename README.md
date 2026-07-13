@@ -127,8 +127,8 @@ Departments: `Z1/F53` Convenience · `Z1/F55` Outsourced Bakery · `Z1/G12` Edib
 
 ## Dashboard refresh
 
-The dashboard auto-refreshes every 60 s (single re-armed timer, pauses while the tab
-is hidden) and shows a "Last updated HH:MM:SS · data as at …" stamp top-right.
+Screens refresh on navigation, period change, or explicit Apply/refresh — there is no
+background auto-refresh timer. The header shows a "data as at …" stamp.
 
 ## Anomaly types
 
@@ -184,3 +184,69 @@ The dashboard adds a **GR / Margin** panel (latest goods-receipt blended margin 
 per-dept vs-guideline breakdown with inline margin flags) and a **Margin performance**
 section (departments grouped Non-Fresh / Fresh-A / Fresh-B, actual-vs-guideline margin
 and participation bars, worst performer per group highlighted).
+
+## Analytics UI (single-page app)
+
+`/` serves the **SPA** (`src/app.ts`, hash-routed, all CSS/JS inline). `/classic` is
+the legacy dashboard (`src/dashboard.ts`); `/upload` is the upload page. Screens refresh
+on navigation / period change only (no background timer).
+
+- **Shared period picker** (`GET /api/periods`): Yesterday / This week / This month +
+  fiscal year / period / week + custom. Never offers "today"; every range is capped at
+  the latest data date. Applied across Department, Stock, Funding, Category, Vendor,
+  Waste, Goods-Receipt and IMA screens.
+- **Trading** compares the selected period against the **same period last year** (TY vs LY).
+- **Article Analysis** — three lenses side by side: **PO value ordered** (`po_lines`) vs
+  **GR value received** (`gr_lines`), a 12-month monthly-average **unit-price** line
+  (per SKU unit = net value ÷ SKU qty), and **FIM** cross-match (net sales / waste /
+  shrink from `fim_articles` where present, with an earliest-date hint otherwise) plus
+  per-month GR / waste / shrink bars. Funding is **not** article-attributable in the
+  statement data (Bonus Buy = promo-batch ref, Swell = category level) and is omitted
+  with a note.
+- **Weekly view** — fiscal-week picker (Monday-start), four day-by-day blocks
+  (purchase orders, goods receipts, FIM margins — Fresh-B contributes weekly-averaged
+  margins, daily suppressed), and week-scoped anomalies.
+- **Fan Score / NPS** — a week selector drives the whole page; the trend is a rolling
+  6 weeks ending at the selected week with a 90 % target line.
+- **Anomaly drill-through** — every anomaly row (Weekly view + Risk & Anomalies) links
+  to its evidence: `PRICE_SPIKE` → Article Analysis (spike month highlighted),
+  `FIM_HIGH_WASTE`/`FIM_HIGH_SHRINK` → Waste & Shrinkage filtered to dept + period,
+  stale order → the PO in Open Orders. One delegated click listener on `[data-drill]`.
+
+## Weekly budgets from LY FIM
+
+`GET /api/budgets/generate-ly?week=&growthPct=&marginPct=` builds a weekly budget from
+**last year's** corresponding fiscal week (same week number). LY net sales per SAP
+department come from FIM at the finest report-type per day (weekly for Fresh-B where it
+exists, daily/monthly rollup otherwise). Per department: `sales budget = LY sales ×
+(1 + growth%)`, `GR budget = sales budget × (1 − required margin%)`, no PO budget; the
+store total is the sum of departments. The **Budgets** page reviews the table (editable
+sales budgets) and saves via `POST /api/weekly-budgets` (`weekly_budgets`, one row per
+week × budget_type × department). Admin-gated.
+
+## Auto-close aged POs
+
+Open PO lines older than `app_settings.open_po_max_age_days` (default **90**, editable in
+Settings) are treated as closed at query level — excluded from Open / Committed tiles,
+the invoice-to-deliver views and stale flags — **without mutating rows** (historic
+analysis screens still see them). See `notAgedOutSql` / `openPoMaxAgeDays` in
+`src/db/repo.ts`.
+
+## New/notable endpoints
+
+```bash
+curl "…/api/periods"                                   # period-picker options
+curl "…/api/trading?from=&to="                         # TY vs LY period comparison
+curl "…/api/articles?limit=1000"                       # article list (PO + GR value)
+curl "…/api/articles/848207"                           # article detail (3 lenses)
+curl "…/api/weekly/day-blocks?from=&to="               # PO / GR / FIM per day
+curl "…/api/anomalies/scoped?from=&to=&resolved=false" # week-scoped, drill-enriched
+curl "…/api/budgets/generate-ly?week=&growthPct=&marginPct="
+curl "…/api/fan-score/summary?week="                   # + /history?week= , /responses?week=
+curl "…/api/fim/by-period"                             # fiscal-period rollup w/ date ranges
+```
+
+> Data note: the D1 database caps large ingests (~60k rows/upload) on the per-operation
+> CPU limit; `fim_daily` mixes daily/weekly/monthly `report_type` rows, so read it via
+> the finest-resolution CTE (`fimResolvedCte` in `src/analytics.ts`) rather than raw
+> `date_from>=? AND date_to<=?` containment.
