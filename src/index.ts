@@ -1621,6 +1621,53 @@ async function buildGrPanel(env: Env, guidelines: Awaited<ReturnType<typeof fetc
 }
 
 /**
+ * "Yesterday's goods receipt" tile: the single most recent GR business day
+ * (MAX(gr_date), i.e. yesterday's receipts), aggregated across whatever
+ * upload(s) carry that date. Distinct from buildGrPanel, which is upload-scoped
+ * (filename + upload-level margin flags) for the legacy /classic dashboard.
+ */
+async function buildGrYesterday(env: Env) {
+  const latest = await env.DB.prepare(`SELECT MAX(gr_date) AS d FROM gr_lines`).first<{ d: string | null }>();
+  const date = latest?.d ?? null;
+  if (!date) return null;
+
+  const summary = await env.DB.prepare(
+    `SELECT COUNT(*) AS lines,
+            COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
+            COALESCE(SUM(sell_zar),0) AS sell
+     FROM gr_lines WHERE gr_date = ?`,
+  )
+    .bind(date)
+    .first<{ lines: number; cost: number; sell: number }>();
+
+  const deptRows = await env.DB.prepare(
+    `SELECT dept_code, MAX(dept_name) AS dept_name,
+            COALESCE(SUM(sell_zar),0) AS sell
+     FROM gr_lines WHERE gr_date = ?
+     GROUP BY dept_code ORDER BY sell DESC LIMIT 3`,
+  )
+    .bind(date)
+    .all<{ dept_code: string; dept_name: string; sell: number }>();
+
+  const blended = (cost: number, sell: number) => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
+
+  return {
+    date,
+    totals: {
+      lines: summary?.lines ?? 0,
+      costZar: round2n(summary?.cost ?? 0),
+      sellZar: round2n(summary?.sell ?? 0),
+      blendedMarginPct: blended(summary?.cost ?? 0, summary?.sell ?? 0),
+    },
+    departments: (deptRows.results ?? []).map((d) => ({
+      deptCode: d.dept_code,
+      deptName: d.dept_name,
+      sellZar: round2n(d.sell),
+    })),
+  };
+}
+
+/**
  * Margin-performance section: latest FIM day per department, grouped
  * Non-Fresh / Fresh-A / Fresh-B, with actual-vs-guideline margin, actual-vs-
  * guideline participation, and the worst performer per group flagged.
@@ -1807,6 +1854,7 @@ async function handleDashboard(env: Env): Promise<Response> {
   // GR margin panel + FIM margin performance (share one guideline snapshot).
   const guidelines = await fetchCurrentGuidelines(env);
   const grPanel = await buildGrPanel(env, guidelines);
+  const grYesterday = await buildGrYesterday(env);
   const marginPerformance = await buildMarginPerformance(env, guidelines);
 
   return json({
@@ -1820,6 +1868,7 @@ async function handleDashboard(env: Env): Promise<Response> {
     recentUploads: recentUploads.results,
     budgets,
     grPanel,
+    grYesterday,
     marginPerformance,
   });
 }

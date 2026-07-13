@@ -874,8 +874,8 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   h+='<div id="dashRow1"><div class="loading">Loading\\u2026</div></div>';
   // Row 2: Latest GR tile + Open order aging tile.
   var grTile;
-  if(d.grPanel){var g=d.grPanel;var t3=(g.departments||[]).slice(0,3);
-    grTile='<div class="card clik" onclick="location.hash=\\'#gr\\'" title="Open Goods Receipts"><h2>Latest goods receipt'+(g.uploadedAt?' \\u00b7 '+esc((g.uploadedAt||"").slice(0,10)):'')+'</h2>'
+  if(d.grYesterday){var g=d.grYesterday;var t3=(g.departments||[]).slice(0,3);
+    grTile='<div class="card clik" onclick="location.hash=\\'#gr\\'" title="Open Goods Receipts"><h2>Latest goods receipt'+(g.date?' \\u00b7 '+esc(g.date):'')+'</h2>'
       +'<div class="cards kpis">'+kpi("Lines",num(g.totals.lines),null)+kpi("Cost",R(g.totals.costZar*100),null)+kpi("Sell",R(g.totals.sellZar*100),null)+kpi("Blended margin",pct(g.totals.blendedMarginPct),null)+'</div>'
       +(t3.length?'<div class="mlist" style="margin-top:6px"><div class="small muted" style="margin-bottom:3px">Top departments by value</div>'+t3.map(function(x){return '<div class="mc-row"><span class="mc-l">'+esc(x.deptCode)+' '+esc(x.deptName||"")+'</span><span class="mc-v">'+Rr0(x.sellZar)+'</span></div>'}).join("")+'</div>':'')
       +'</div>';
