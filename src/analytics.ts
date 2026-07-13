@@ -3199,6 +3199,91 @@ export async function handleBudgetsSuggest(req: Request, env: Env): Promise<Resp
 }
 
 /**
+ * GET /api/budgets/generate-ly?week=&growthPct=&marginPct=
+ * Weekly budget generated from LAST YEAR's FIM. For the target fiscal week, take
+ * the CORRESPONDING fiscal week of the previous year (same week_no), read LY net
+ * sales per SAP department from FIM at the finest report_type per day (weekly for
+ * Fresh-B depts, daily-rollup otherwise — via fimResolvedCte, which also avoids
+ * the daily/weekly double-count), then per department:
+ *     sales budget = LY sales × (1 + growth%)
+ *     GR budget    = sales budget × (1 − required margin%)
+ * Store total = sum of departments. No PO budget. Read-only; persist via POST
+ * /api/weekly-budgets. Also returns a Monday-start fiscal-week list for the picker.
+ */
+export async function handleBudgetsGenerateLy(req: Request, env: Env): Promise<Response> {
+  const q = new URL(req.url).searchParams;
+  const growthPct = Number(q.get("growthPct") ?? "5") || 0;
+  const marginPct = Number(q.get("marginPct") ?? "25") || 0;
+
+  // Selector window: ~8 past + next weeks (fiscal weeks are Monday-start) and the
+  // default target (next upcoming week) — independent reads, fetched together.
+  const [weeksRes, defRow] = await Promise.all([
+    env.DB.prepare(
+      `SELECT fiscal_week_code, fiscal_year, week_no, week_start, week_end FROM fiscal_weeks
+         WHERE week_start >= date('now','-56 days') ORDER BY week_start LIMIT 24`,
+    ).all<{ fiscal_week_code: string; fiscal_year: number; week_no: number; week_start: string; week_end: string }>(),
+    env.DB.prepare(
+      `SELECT fiscal_week_code FROM fiscal_weeks WHERE week_end >= date('now') ORDER BY week_start LIMIT 1`,
+    ).first<{ fiscal_week_code: string }>(),
+  ]);
+  const weekList = weeksRes.results ?? [];
+  const targetCode = q.get("week") || defRow?.fiscal_week_code || weekList[weekList.length - 1]?.fiscal_week_code || null;
+  if (!targetCode) return json({ error: "No fiscal weeks available." }, 404);
+
+  const target =
+    weekList.find((w) => w.fiscal_week_code === targetCode) ??
+    (await env.DB.prepare(
+      `SELECT fiscal_week_code, fiscal_year, week_no, week_start, week_end FROM fiscal_weeks WHERE fiscal_week_code = ?`,
+    ).bind(targetCode).first<{ fiscal_week_code: string; fiscal_year: number; week_no: number; week_start: string; week_end: string }>());
+  if (!target) return json({ error: "Target week not found.", week: targetCode }, 404);
+
+  // Corresponding fiscal week last year: same week_no, previous fiscal year.
+  const ly = await env.DB.prepare(
+    `SELECT fiscal_week_code, week_start, week_end FROM fiscal_weeks WHERE fiscal_year = ? AND week_no = ?`,
+  ).bind(target.fiscal_year - 1, target.week_no).first<{ fiscal_week_code: string; week_start: string; week_end: string }>();
+
+  let deptRows: { dept_code: string; dept_name: string; sales: number }[] = [];
+  if (ly) {
+    deptRows =
+      (
+        await env.DB.prepare(
+          `${fimResolvedCte("WITH")}
+           SELECT dept_code, MAX(dept_name) dept_name, COALESCE(SUM(net_sales_zar),0) sales
+           FROM fr GROUP BY dept_code HAVING sales <> 0 ORDER BY sales DESC`,
+        ).bind(ly.week_start, ly.week_end).all<{ dept_code: string; dept_name: string; sales: number }>()
+      ).results ?? [];
+  }
+
+  const g = growthPct / 100;
+  const m = marginPct / 100;
+  const depts = deptRows.map((r) => {
+    const lySalesZar = Math.round(Number(r.sales));
+    const salesBudgetZar = Math.round(lySalesZar * (1 + g));
+    const grBudgetZar = Math.round(salesBudgetZar * (1 - m));
+    return { code: r.dept_code, name: r.dept_name || r.dept_code, lySalesZar, salesBudgetZar, grBudgetZar };
+  });
+  // Store total is the SUM of departments (per the brief), not a re-derived figure.
+  const store = {
+    lySalesZar: depts.reduce((a, d) => a + d.lySalesZar, 0),
+    salesBudgetZar: depts.reduce((a, d) => a + d.salesBudgetZar, 0),
+    grBudgetZar: depts.reduce((a, d) => a + d.grBudgetZar, 0),
+  };
+
+  const flags = await cashFlowFlags(env, [target.fiscal_week_code]);
+  const cf = flags.get(target.fiscal_week_code);
+
+  return json({
+    params: { growthPct, marginPct },
+    week: { code: target.fiscal_week_code, weekNo: target.week_no, fiscalYear: target.fiscal_year, weekStart: target.week_start, weekEnding: target.week_end },
+    lyWeek: ly ? { code: ly.fiscal_week_code, weekStart: ly.week_start, weekEnding: ly.week_end } : null,
+    store,
+    depts,
+    cashFlowFlags: cf && cf.severity ? [cf] : [],
+    weeks: weekList.map((w) => ({ code: w.fiscal_week_code, weekNo: w.week_no, weekStart: w.week_start, weekEnding: w.week_end })),
+  });
+}
+
+/**
  * GET /api/creditor-payments?weeks=N — upcoming PnP statement payments + salary outflow +
  * cash-flow risk for the next N fiscal weeks (default 8). Est. creditor payment = purchases
  * from the trading week whose statement falls due this week. Salary out = monthly_salary_zar

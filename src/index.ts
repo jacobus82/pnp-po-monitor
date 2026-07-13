@@ -75,6 +75,7 @@ import {
   handleTrading,
   handleCashFlowFlags,
   handleBudgetsSuggest,
+  handleBudgetsGenerateLy,
   handleCreditorPayments,
   handleDashboardCashflow,
   handleWaste,
@@ -2191,6 +2192,7 @@ export default {
       }
       if (path === "/api/budgets/summary" && m === "GET") return await handleBudgetsSummary(env);
       if (path === "/api/budgets/suggest" && m === "GET") return await handleBudgetsSuggest(req, env);
+      if (path === "/api/budgets/generate-ly" && m === "GET") return await handleBudgetsGenerateLy(req, env);
       if (path === "/api/cash-flow-flags" && m === "GET") return await handleCashFlowFlags(req, env);
       if (path === "/api/creditor-payments" && m === "GET") return await handleCreditorPayments(req, env);
       if (path === "/api/trading" && m === "GET") return await handleTrading(req, env);

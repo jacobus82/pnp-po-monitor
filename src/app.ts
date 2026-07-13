@@ -1404,9 +1404,93 @@ function bgSaveAll(){
   Promise.all(calls).then(function(){if(msg)msg.textContent="Saved.";closeModal();PAGES.budgets()}).catch(function(e){if(msg)msg.textContent="Error: "+(e&&e.message||e)});
 }
 
+// ---- Weekly budget generator from LY FIM (Brief 3) ----
+// sales budget = LY sales x (1+growth); GR budget = sales budget x (1-required margin);
+// store total = sum of departments; no PO budget. Growth regenerates sales from LY;
+// margin only re-derives GR; per-department sales budgets are editable before saving.
+function openBudgetGenLy(){
+  openModal("Generate weekly budget \\u2014 from LY FIM",'<div class="loading">Loading\\u2026</div>');
+  Promise.all([api("/api/budgets/generate-ly"),api("/api/settings")]).then(function(res){
+    var d=res[0],s=(res[1]&&res[1].settings)||{};
+    window._bgly={data:d,defaultMargin:(s.target_gp_pct!=null&&s.target_gp_pct!=="")?Number(s.target_gp_pct):25};
+    bglyForm(d);
+  }).catch(function(e){var b=$("modalBody");if(b)b.innerHTML='<div class="err">'+esc(e&&e.message||e)+'</div>'});
+}
+function bglyForm(d){
+  var st=window._bgly;st.data=d;
+  var g=(st.g!=null)?st.g:((d.params&&d.params.growthPct!=null)?d.params.growthPct:5);
+  var m=(st.m!=null)?st.m:st.defaultMargin;st.g=g;st.m=m;
+  var weeks=d.weeks||[];
+  var sel='<select class="sel" id="bglyWeek" onchange="bglyWeekChange()">'+weeks.map(function(w){return '<option value="'+esc(w.code)+'"'+(w.code===d.week.code?" selected":"")+'>'+esc(w.code)+' \\u00b7 W'+w.weekNo+' \\u00b7 W/E '+esc(w.weekEnding)+'</option>'}).join("")+'</select>';
+  var top='<div class="toolbar" style="gap:14px;flex-wrap:wrap">'
+    +'<label class="small muted">Target week '+sel+'</label>'
+    +'<label class="small muted">Growth % <input class="inp" id="bglyG" type="number" step="0.1" value="'+g+'" style="width:80px" oninput="bglyRecalc()"></label>'
+    +'<label class="small muted">Required margin % <input class="inp" id="bglyM" type="number" step="0.1" value="'+m+'" style="width:80px" oninput="bglyMarginChange()"></label>'
+    +'</div>';
+  var lyLine=d.lyWeek?('LY source: '+esc(d.lyWeek.code)+' \\u00b7 '+esc(d.lyWeek.weekStart)+' \\u2192 '+esc(d.lyWeek.weekEnding)):'<span class="neg">No corresponding LY fiscal week \\u2014 cannot source FIM.</span>';
+  var cf=(d.cashFlowFlags||[])[0];
+  var cfLine=cf?'<div class="small '+(cf.severity==="CRITICAL"?"neg":"")+'" style="margin-top:4px">\\u26A0 '+esc(cf.message)+'</div>':'';
+  $("modalBody").innerHTML=top+'<div class="small muted" style="margin:6px 0">'+lyLine+'</div>'+cfLine
+    +'<div id="bglyTbl"></div>'
+    +'<div style="margin-top:12px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn" onclick="bglySave()"'+((d.depts&&d.depts.length)?"":" disabled")+'>\\uD83D\\uDCBE Save weekly budget</button><span id="bglyMsg" class="small muted"></span></div>';
+  bglyRecalc();
+}
+function bglyWeekChange(){
+  var st=window._bgly;var wc=$("bglyWeek").value,g=$("bglyG").value,m=$("bglyM").value;
+  st.g=Number(g);st.m=Number(m);
+  var t=$("bglyTbl");if(t)t.innerHTML='<div class="loading">Sourcing LY FIM\\u2026</div>';
+  api("/api/budgets/generate-ly?week="+encodeURIComponent(wc)+"&growthPct="+g+"&marginPct="+m).then(bglyForm).catch(function(e){var t2=$("bglyTbl");if(t2)t2.innerHTML='<div class="err">'+esc(e&&e.message||e)+'</div>'});
+}
+function bglyRecalc(){
+  var st=window._bgly,d=st.data;if(!d)return;
+  var g=Number($("bglyG").value)||0,m=Number($("bglyM").value)||0;st.g=g;st.m=m;
+  var depts=d.depts||[];
+  if(!depts.length){$("bglyTbl").innerHTML='<div class="card" style="margin-top:8px"><div class="muted small">No LY FIM sales for this week\\u2019s departments.</div></div>';return;}
+  var rows=depts.map(function(x,i){
+    var sales=Math.round(x.lySalesZar*(1+g/100)),gr=Math.round(sales*(1-m/100));
+    return '<tr><td>'+esc(x.code)+' '+esc(x.name)+'</td><td class="num">'+Rr0(x.lySalesZar)+'</td>'
+      +'<td class="num"><input class="inp" id="bglyS'+i+'" type="number" value="'+sales+'" style="width:120px;text-align:right" oninput="bglyRowRecalc('+i+')"></td>'
+      +'<td class="num" id="bglyGR'+i+'">'+Rr0(gr)+'</td></tr>';
+  }).join("");
+  $("bglyTbl").innerHTML='<div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Department</th><th class="num">LY sales</th><th class="num">Sales budget</th><th class="num">GR budget</th></tr></thead><tbody>'+rows
+    +'<tr style="font-weight:800;border-top:2px solid var(--nav)"><td>STORE TOTAL</td><td class="num" id="bglyTLY"></td><td class="num" id="bglyTS"></td><td class="num" id="bglyTGR"></td></tr>'
+    +'</tbody></table></div>';
+  bglyTotals();
+}
+function bglyMarginChange(){
+  var st=window._bgly,depts=(st.data&&st.data.depts)||[],m=Number($("bglyM").value)||0;st.m=m;
+  depts.forEach(function(x,i){var el=$("bglyS"+i);if(el){var gr=Math.round((Number(el.value)||0)*(1-m/100));var c=$("bglyGR"+i);if(c)c.textContent=Rr0(gr);}});
+  bglyTotals();
+}
+function bglyRowRecalc(i){
+  var m=Number($("bglyM").value)||0,sales=Number($("bglyS"+i).value)||0;
+  var c=$("bglyGR"+i);if(c)c.textContent=Rr0(Math.round(sales*(1-m/100)));
+  bglyTotals();
+}
+function bglyTotals(){
+  var st=window._bgly,depts=(st.data&&st.data.depts)||[],m=Number($("bglyM").value)||0;
+  var tly=0,ts=0,tgr=0;
+  depts.forEach(function(x,i){var el=$("bglyS"+i);var sales=el?(Number(el.value)||0):0;tly+=x.lySalesZar;ts+=sales;tgr+=Math.round(sales*(1-m/100));});
+  if($("bglyTLY"))$("bglyTLY").textContent=Rr0(tly);
+  if($("bglyTS"))$("bglyTS").textContent=Rr0(ts);
+  if($("bglyTGR"))$("bglyTGR").textContent=Rr0(tgr);
+}
+function bglySave(){
+  var st=window._bgly,d=st.data,m=Number($("bglyM").value)||0,depts=(d&&d.depts)||[],msg=$("bglyMsg");
+  if(!depts.length)return;if(msg)msg.textContent="Saving\\u2026";
+  var rows=[],ts=0,tgr=0;
+  depts.forEach(function(x,i){var sales=Number($("bglyS"+i).value)||0,gr=Math.round(sales*(1-m/100));ts+=sales;tgr+=gr;
+    rows.push({budget_type:"department",department:x.code,sales_budget_zar:sales,po_budget_zar:null,gr_budget_zar:gr});});
+  rows.unshift({budget_type:"store",department:"TOTAL",sales_budget_zar:ts,po_budget_zar:null,gr_budget_zar:tgr});
+  adminSend("/api/weekly-budgets","POST",{week_code:d.week.code,week_ending:d.week.weekEnding,rows:rows}).then(function(j){
+    if(msg)msg.textContent=(j&&j.status==="ok")?("Saved "+j.rows+" rows for "+d.week.code+"."):("Error: "+(j&&j.error||"failed"));
+    if(j&&j.status==="ok")setTimeout(function(){closeModal();PAGES.budgets()},800);
+  }).catch(function(e){if(msg)msg.textContent="Error: "+(e&&e.message||e)});
+}
+
 PAGES.budgets=function(){loading();api("/api/budgets/summary").then(function(d){
   var weeks=d.weeks||[];
-  var h='<div class="toolbar"><button class="btn" onclick="openBudgetGen()">\\u25B6 Generate Budgets</button></div>'
+  var h='<div class="toolbar"><button class="btn" onclick="openBudgetGenLy()">\\u25B6 Generate from LY FIM</button> <button class="btn alt" onclick="openBudgetGen()">Advanced generator</button></div>'
     +'<div class="card"><h2>Weekly budgets \\u2014 Sales / PO / GR</h2>'
     +'<div class="muted small" style="margin-bottom:8px">Past 8 + next 4 fiscal weeks. Sales variance is green when over budget; PO/GR variance is green when under budget. Future weeks show \\u2014. Click a week for the department breakdown.</div>'
     +'<div class="tablewrap"><table><thead>'
