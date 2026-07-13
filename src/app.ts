@@ -509,7 +509,7 @@ function colChart(series,opts){
     var col=series[i].color||"#2E6CA8";
     bars+='<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(0,h).toFixed(1)+'" fill="'+col+'" rx="2"><title>'+esc(series[i].label)+": "+R0(series[i].value)+'</title></rect>';
     if(n<=16)labels+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-pad+12)+'" font-size="9" text-anchor="middle" fill="#6a7480">'+esc(series[i].short||series[i].label)+'</text>';
-    if(opts.valueLabels&&n<=16)labels+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+Math.max(9,y-3).toFixed(1)+'" font-size="8.5" text-anchor="middle" fill="#3a4550">'+esc((opts.valueFmt||R0)(series[i].value))+'</text>';
+    if(opts.valueLabels&&n<=16&&series[i].value>0)labels+='<text x="'+(x+bw/2).toFixed(1)+'" y="'+Math.max(9,y-3).toFixed(1)+'" font-size="8.5" text-anchor="middle" fill="#3a4550">'+esc((opts.valueFmt||R0)(series[i].value))+'</text>';
   }
   var bl="";
   if(opts.budget){var by=H-pad-(opts.budget/max)*(H-pad*2);bl='<line x1="'+pad+'" y1="'+by.toFixed(1)+'" x2="'+(W-pad)+'" y2="'+by.toFixed(1)+'" stroke="#BE1D37" stroke-width="1.5" stroke-dasharray="5 4"/><text x="'+(W-pad)+'" y="'+(by-4).toFixed(1)+'" font-size="9" text-anchor="end" fill="#BE1D37">budget</text>'}
@@ -623,16 +623,71 @@ function vtab(t){var d=window._vd;if(!d)return;
   else if(t==="returns")c.innerHTML=makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"article_code",label:"Article"},{key:"description",label:"Description"},{key:"value",label:"Value",num:true,fmt:R}],d.returns||[],{rowMenu:false});
   else c.innerHTML=makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"article_code",label:"Article"},{key:"description",label:"Description"},{key:"mdse_cat",label:"Cat"},{key:"sloc",label:"SLoc"},{key:"order_qty",label:"Qty",num:true},{key:"net_price_cents",label:"Price",num:true,fmt:R},{key:"line_value_cents",label:"Value",num:true,fmt:R}],d.lines||[],{});
 }
+// 12 month keys (YYYY-MM) ending at the anchor month, oldest first.
+function last12Months(anchor){
+  if(!anchor)return [];
+  var y=+String(anchor).slice(0,4),m=+String(anchor).slice(5,7),out=[];
+  for(var i=11;i>=0;i--){var mm=m-i,yy=y;while(mm<=0){mm+=12;yy--;}out.push(yy+"-"+(mm<10?"0"+mm:mm));}
+  return out;
+}
+function monLabel(ym){var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var p=String(ym).split("-");return p.length<2?ym:M[(+p[1])-1]+" "+p[0].slice(2);}
+// Scaffold a 12-month series (missing months = 0) for a colChart bar block.
+function monthlySeries(rows,key,anchor){
+  var months=last12Months(anchor),byM={};(rows||[]).forEach(function(r){byM[r.month]=r});
+  return months.map(function(ym){var r=byM[ym];return {label:monLabel(ym),short:monLabel(ym),value:r?(r[key]||0):0}});
+}
+// Lens 4 — monthly average unit price line over the last 12 months, each existing
+// point labelled with its price; gaps (no orders that month) leave a break.
+function artPriceChart(priceMonthly,anchor){
+  var months=last12Months(anchor);
+  if(!months.length)return '<div class="muted small">No price history.</div>';
+  var byM={};(priceMonthly||[]).forEach(function(p){byM[p.month]=p});
+  var pts=months.map(function(ym,i){var p=byM[ym];return {i:i,month:ym,value:(p&&p.unitPriceCents!=null)?(p.unitPriceCents/100):null}});
+  var ex=pts.filter(function(p){return p.value!=null});
+  if(!ex.length)return '<div class="muted small">No unit price in the last 12 months.</div>';
+  var W=760,H=250,pad=48,n=months.length;
+  var vals=ex.map(function(p){return p.value});
+  var mx=Math.max.apply(null,vals),mn=Math.min.apply(null,vals);
+  if(mx<=mn)mx=mn+Math.max(1,mn*0.1);var span=mx-mn||1;mn=Math.max(0,mn-span*0.2);mx=mx+span*0.28;
+  function X(i){return pad+(n<=1?(W-2*pad)/2:i*(W-2*pad)/(n-1))}
+  function Y(v){return H-pad-((v-mn)/(mx-mn))*(H-2*pad)}
+  var line='<polyline points="'+ex.map(function(p){return X(p.i).toFixed(1)+","+Y(p.value).toFixed(1)}).join(" ")+'" fill="none" stroke="#2E6CA8" stroke-width="2"/>';
+  var dots=ex.map(function(p){return '<circle cx="'+X(p.i).toFixed(1)+'" cy="'+Y(p.value).toFixed(1)+'" r="3.5" fill="#2E6CA8"><title>'+esc(monLabel(p.month))+": "+R(p.value*100)+'</title></circle>'}).join("");
+  var vlabs=ex.map(function(p){return '<text x="'+X(p.i).toFixed(1)+'" y="'+Math.max(12,Y(p.value)-8).toFixed(1)+'" font-size="9" font-weight="700" text-anchor="middle" fill="#2E6CA8">'+R(p.value*100)+'</text>'}).join("");
+  var xlabs=months.map(function(ym,i){return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(monLabel(ym))+'</text>'}).join("");
+  var yax='<text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+R(mx*100)+'</text><text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">'+R(mn*100)+'</text>';
+  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+line+dots+vlabs+yax+xlabs+'</svg></div>';
+}
 function openArticle(code){openModal("Article "+esc(code),'<div class="loading">Loading\\u2026</div>');
   api("/api/articles/"+encodeURIComponent(code)).then(function(d){
-    var k=d.kpis||{};
+    var k=d.kpis||{},fim=d.fim;
     var pb=k.price_basis==="unit"?("per "+esc(k.sku_uom||"unit")):"per order unit";
-    var head='<div class="cards kpis">'+kpi("Total value",R(k.total_value),null)+kpi("Unit price",R(k.avg_price),pb)
-      +kpi("Min price",R(k.min_price),null)+kpi("Max price",R(k.max_price),null)+kpi("Orders",num(k.order_count),null)+'</div>';
-    var hist=(d.history||[]).map(function(h){return {label:h.order_date+" "+(h.vendor||""),value:(h.unit_price_cents||0)/100}});
-    var chart='<div class="card"><h2>Price history <span class="muted small">(unit price)</span></h2>'+lineChart(hist)+'</div>';
+    var fimHint=d.fimEarliestGlobal?("FIM articles from "+esc(d.fimEarliestGlobal)):"not in FIM";
+    // Lens 1/2 — PO ordered, GR received, unit price, and the FIM cross-match.
+    var head='<div class="cards kpis">'
+      +kpi("PO value ordered",R(k.total_value),num(k.order_count)+" orders")
+      +kpi("GR value received",Rr0(k.grCostZar),k.grLines?(num(k.grLines)+" GR lines"):"no GR")
+      +kpi("Unit price",R(k.avg_price),pb)
+      +kpi("FIM net sales",fim?Rr0(fim.sales):'\\u2014',fim?("since "+esc(fim.earliest)):fimHint)
+      +kpi("FIM waste / shrink",fim?(Rr0(fim.waste)+" / "+Rr0(fim.shrink)):'\\u2014',fim?"FIM article rows":fimHint)
+      +'</div>';
+    // Lens 4 — 12-month monthly average unit price.
+    var priceChart='<div class="card" style="margin-top:14px"><h2>Unit price \\u00b7 monthly average <span class="muted small">last 12 months</span></h2>'+artPriceChart(d.priceMonthly,d.anchor)+'</div>';
+    // Lens 5 — GR value by month; waste/shrink by month where FIM has the article.
+    var grBars='<div class="card" style="margin-top:14px"><h2>GR value received by month <span class="muted small">@ cost</span></h2>'+colChart(monthlySeries(d.grMonthly,"cost",d.anchor),{valueLabels:true,valueFmt:Rr0})+'</div>';
+    var wasteShrink;
+    if(fim){
+      wasteShrink='<div class="cards g2" style="margin-top:14px">'
+        +'<div class="card"><h2>Waste by month <span class="muted small">FIM</span></h2>'+colChart(monthlySeries(d.fimMonthly,"waste",d.anchor),{valueLabels:true,valueFmt:Rr0})+'</div>'
+        +'<div class="card"><h2>Shrink by month <span class="muted small">FIM</span></h2>'+colChart(monthlySeries(d.fimMonthly,"shrink",d.anchor),{valueLabels:true,valueFmt:Rr0})+'</div>'
+        +'</div>';
+    }else{
+      wasteShrink='<div class="card" style="margin-top:14px"><h2>Waste &amp; shrink <span class="muted small">FIM</span></h2><div class="muted small">No FIM article-level data for this item'+(d.fimEarliestGlobal?' \\u2014 FIM article data begins '+esc(d.fimEarliestGlobal)+' (going-forward only)':'')+'.</div></div>';
+    }
+    // Lens 3 — funding is not article-attributable in the statement data (user decision: omit + note).
+    var fundNote='<div class="card" style="margin-top:14px"><h2>Funding</h2><div class="muted small">Funding (Bonus Buy / Swell / rebates) is not article-attributable in the account-statement data: Bonus Buy lines carry only a promo-batch reference and Swell is booked at category level. See the Funding screen for department-level totals.</div></div>';
     var lines=makeTable([{key:"po_number",label:"PO"},{key:"order_date",label:"Date"},{key:"vendor",label:"Vendor"},{key:"order_qty",label:"Qty",num:true},{key:"net_price_cents",label:"Order price",num:true,fmt:R},{key:"line_value_cents",label:"Value",num:true,fmt:R},{key:"sloc",label:"SLoc"}],d.lines||[],{});
-    openModal("Article "+esc(k.description||code)+' <span class="tag">'+esc(code)+"</span> <span class=\\"tag\\">"+esc(k.dept||"")+"</span>",head+chart+'<div class="card" style="margin-top:14px"><h2>Order lines</h2>'+lines+'</div>');
+    openModal("Article "+esc(k.description||code)+' <span class="tag">'+esc(code)+"</span> <span class=\\"tag\\">"+esc(k.dept||"")+"</span>",head+priceChart+grBars+wasteShrink+fundNote+'<div class="card" style="margin-top:14px"><h2>Order lines</h2>'+lines+'</div>');
   }).catch(function(e){openModal("Article "+esc(code),'<div class="err">'+esc(e.message)+'</div>')});
 }
 function openPO(po){openModal("PO "+esc(po),'<div class="loading">Loading\\u2026</div>');
@@ -1458,13 +1513,24 @@ PAGES.vendors=function(){
   initPeriodPicker("vperiod",load,"month");
 };
 
+var _artRows=[],_artRank="po";
 PAGES.articles=function(){loading();api("/api/articles?limit=1000").then(function(d){
-  var rows=d.articles||[];
-  setHTML('<div class="card"><h2>Article analysis (top '+rows.length+' by value)</h2>'+makeTable([
-    {key:"code",label:"Article"},{key:"description",label:"Description",cls:"desc"},{key:"dept",label:"Dept",mobileHide:true},
-    {key:"total_value",label:"Total value",num:true,fmt:R},{key:"avg_price",label:"Unit price",num:true,mobileHide:true,html:function(r){return R(r.avg_price)+(r.price_basis==="unit"?'<span class="muted small"> /'+esc(r.sku_uom||"ea")+'</span>':'<span class="muted small" title="per order unit \\u2014 re-upload with SKU qty for per-unit price"> *</span>')}},{key:"order_count",label:"Orders",num:true}
-  ],rows,{onRow:function(r){openArticle(r.code)}})+'</div>');
+  _artRows=d.articles||[];artRender();
 }).catch(errBox)};
+function artRank(m){_artRank=m;artRender();}
+function artRender(){
+  var rows=_artRows.slice();
+  rows.sort(function(a,b){return _artRank==="gr"?((b.gr_cost||0)-(a.gr_cost||0)):((b.total_value||0)-(a.total_value||0))});
+  var toggle='<div class="tabs" style="margin-bottom:8px">'
+    +'<button class="'+(_artRank==="po"?"active":"")+'" onclick="artRank(\\'po\\')">Rank by PO value ordered</button>'
+    +'<button class="'+(_artRank==="gr"?"active":"")+'" onclick="artRank(\\'gr\\')">Rank by GR value received</button></div>';
+  setHTML('<div class="card"><h2>Article analysis <span class="muted small">'+rows.length+' articles \\u00b7 PO ordered vs GR received</span></h2>'+toggle+makeTable([
+    {key:"code",label:"Article"},{key:"description",label:"Description",cls:"desc"},{key:"dept",label:"Dept",mobileHide:true},
+    {key:"total_value",label:"PO value ordered",num:true,fmt:R},
+    {key:"gr_cost",label:"GR value received",num:true,mobileHide:true,html:function(r){return r.gr_cost?Rr0(r.gr_cost):'<span class="muted">\\u2014</span>'}},
+    {key:"avg_price",label:"Unit price",num:true,mobileHide:true,html:function(r){return R(r.avg_price)+(r.price_basis==="unit"?'<span class="muted small"> /'+esc(r.sku_uom||"ea")+'</span>':'<span class="muted small" title="per order unit \\u2014 re-upload with SKU qty for per-unit price"> *</span>')}},{key:"order_count",label:"Orders",num:true}
+  ],rows,{onRow:function(r){openArticle(r.code)}})+'</div>');
+}
 
 PAGES.categories=function(){
   setHTML(periodPickerHTML("cperiod")+'<div id="cbody"><div class="loading">Loading\\u2026</div></div>');

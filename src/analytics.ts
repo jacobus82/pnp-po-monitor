@@ -249,24 +249,38 @@ export async function handleVendorDetail(env: Env, code: string): Promise<Respon
   });
 }
 
-/** GET /api/articles — article analysis aggregate. */
+/** GET /api/articles — article analysis aggregate (PO value ordered + GR value received). */
 export async function handleArticles(req: Request, env: Env): Promise<Response> {
   const limit = Math.min(Number(new URL(req.url).searchParams.get("limit") ?? "500"), 2000);
-  // Unit price is derived, not stored: net_price_cents is per ORDER unit (per
-  // case), so the true per-unit price is Σ(net value) / Σ(SKU units) over the
-  // article's ordered (non-return) lines that carry a SKU quantity. Where no line
-  // has a SKU qty (older exports), fall back to the per-order-unit average, and
-  // flag price_basis so the UI labels it. Stored lines are never mutated.
+  // Two lenses side by side: PO value ORDERED (po_lines, net of S002 returns) and
+  // GR value RECEIVED (gr_lines cost, in Rand). The article set is the UNION of
+  // both so ranking by either metric surfaces the right articles; the row is
+  // ordered by whichever lens is larger so both top lists are covered by LIMIT.
+  // Unit price is derived, not stored: net_price_cents is per ORDER unit, so the
+  // true per-unit price is Σ(net value)/Σ(SKU units) over ordered lines with a SKU
+  // qty; older exports without SKU qty fall back to the per-order-unit average
+  // (flagged via price_basis). Stored lines are never mutated. gr_lines money is
+  // Rand; po_lines money is cents — po/100 aligns the ORDER BY.
   const rows = await env.DB.prepare(
-    `SELECT a.article_code code, a.description, a.department dept,
-            SUM(${PURCH}) total_value,
-            AVG(p.net_price_cents) opu_price,
-            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.line_value_cents ELSE 0 END) sku_value,
-            SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.sku_qty ELSE 0 END) sku_units,
-            MAX(p.sku_uom) sku_uom,
-            COUNT(*) order_count
-     FROM po_lines p JOIN articles a ON a.id = p.article_id
-     GROUP BY a.id ORDER BY total_value DESC LIMIT ?`,
+    `WITH po AS (
+        SELECT a.article_code code, a.description desc_, a.department dept,
+               SUM(${PURCH}) po_value_cents, AVG(p.net_price_cents) opu_price,
+               SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.line_value_cents ELSE 0 END) sku_value,
+               SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.sku_qty ELSE 0 END) sku_units,
+               MAX(p.sku_uom) sku_uom, COUNT(*) order_count
+        FROM po_lines p JOIN articles a ON a.id = p.article_id GROUP BY a.id
+     ), gr AS (
+        SELECT article_code code, MAX(article_desc) desc_, MAX(dept_code) dept,
+               COALESCE(SUM(cost_zar),0) gr_cost, COALESCE(SUM(sell_zar),0) gr_sell, COUNT(*) gr_lines
+        FROM gr_lines WHERE article_code IS NOT NULL AND article_code != '' GROUP BY article_code
+     ), codes AS (SELECT code FROM po UNION SELECT code FROM gr)
+     SELECT c.code code,
+            COALESCE(po.desc_, gr.desc_) description, COALESCE(po.dept, gr.dept) dept,
+            COALESCE(po.po_value_cents,0) total_value, po.opu_price, po.sku_value, po.sku_units,
+            po.sku_uom, COALESCE(po.order_count,0) order_count,
+            COALESCE(gr.gr_cost,0) gr_cost, COALESCE(gr.gr_sell,0) gr_sell, COALESCE(gr.gr_lines,0) gr_lines
+     FROM codes c LEFT JOIN po ON po.code = c.code LEFT JOIN gr ON gr.code = c.code
+     ORDER BY MAX(COALESCE(po.po_value_cents,0)/100.0, COALESCE(gr.gr_cost,0)) DESC LIMIT ?`,
   )
     .bind(limit)
     .all<Record<string, number | string | null>>();
@@ -278,7 +292,10 @@ export async function handleArticles(req: Request, env: Env): Promise<Response> 
       code: r.code,
       description: r.description,
       dept: r.dept,
-      total_value: r.total_value,
+      total_value: r.total_value, // PO value ordered (cents)
+      gr_cost: r.gr_cost, // GR value received @ cost (Rand)
+      gr_sell: r.gr_sell,
+      gr_lines: r.gr_lines,
       order_count: r.order_count,
       // avg_price = the displayed price: true per-SKU-unit where available, else
       // the per-order-unit (per case) figure as a labelled fallback.
@@ -325,36 +342,102 @@ export async function handleArticleDetail(env: Env, code: string): Promise<Respo
     sku_uom: kpisRow.sku_uom ?? null,
     price_basis: hasSku ? "unit" : "order-unit",
   };
-  // kpis gates the 404 first; the price history and line list are then independent.
-  const [history, lines] = await Promise.all([
+  // Anchor the 12-month windows on the article's latest activity (PO or GR) so a
+  // seasonal / discontinued item still shows its own last 12 months.
+  const anchorRow = await env.DB.prepare(
+    `SELECT MAX(d) d FROM (
+        SELECT MAX(p.order_date) d FROM po_lines p JOIN articles a ON a.id=p.article_id WHERE a.article_code = ?
+        UNION ALL SELECT MAX(gr_date) d FROM gr_lines WHERE article_code = ?
+     )`,
+  )
+    .bind(code, code)
+    .first<{ d: string | null }>();
+  const anchor = anchorRow?.d ?? null;
+  const win = anchor ?? "1900-01-01"; // safe no-op window when the article has no dated activity
+
+  // kpis gates the 404 first; the six analytical reads below are then independent.
+  const [priceRows, grRows, grTot, fimRows, fimTot, fimGlobal, lines] = await Promise.all([
+    // Lens 4 — monthly AVERAGE unit price (last 12 months): Σ(net value)/Σ(SKU units)
+    // per month where SKU qty exists, else the per-order-unit average.
     env.DB.prepare(
-      `SELECT p.order_date, p.net_price_cents, p.sku_qty, p.line_value_cents, p.sku_uom, v.vendor_code, v.name vendor
-     FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
-     WHERE a.article_code = ? AND p.order_date IS NOT NULL AND p.net_price_cents IS NOT NULL
-     ORDER BY p.order_date`,
-    )
-      .bind(code)
-      .all<{ order_date: string; net_price_cents: number; sku_qty: number | null; line_value_cents: number | null; sku_uom: string | null; vendor_code: string | null; vendor: string | null }>(),
+      `SELECT substr(p.order_date,1,7) ym,
+              SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.line_value_cents ELSE 0 END) sku_value,
+              SUM(CASE WHEN p.sku_qty > 0 AND COALESCE(p.sloc,'') != 'S002' THEN p.sku_qty ELSE 0 END) sku_units,
+              AVG(CASE WHEN COALESCE(p.sloc,'') != 'S002' THEN p.net_price_cents END) opu, MAX(p.sku_uom) sku_uom
+       FROM po_lines p JOIN articles a ON a.id=p.article_id
+       WHERE a.article_code = ? AND p.order_date IS NOT NULL AND p.order_date >= date(?, '-11 months', 'start of month')
+       GROUP BY ym ORDER BY ym`,
+    ).bind(code, win).all<{ ym: string; sku_value: number; sku_units: number; opu: number | null; sku_uom: string | null }>(),
+    // Lens 5 — GR value by month (last 12 months), cost + sell in Rand.
+    env.DB.prepare(
+      `SELECT substr(gr_date,1,7) ym, COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell
+       FROM gr_lines WHERE article_code = ? AND gr_date IS NOT NULL AND gr_date >= date(?, '-11 months', 'start of month')
+       GROUP BY ym ORDER BY ym`,
+    ).bind(code, win).all<{ ym: string; cost: number; sell: number }>(),
+    // Lens 1 — GR received totals (all time) for the article.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell, COUNT(*) lines, MAX(gr_date) last_gr
+       FROM gr_lines WHERE article_code = ?`,
+    ).bind(code).first<{ cost: number; sell: number; lines: number; last_gr: string | null }>(),
+    // Lens 5 — FIM sales/waste/shrink by month (last 12 months).
+    env.DB.prepare(
+      `SELECT substr(date_from,1,7) ym, COALESCE(SUM(net_sales_zar),0) sales,
+              COALESCE(SUM(waste_zar),0) waste, COALESCE(SUM(shrink_zar),0) shrink
+       FROM fim_articles WHERE article_code = ? AND date_from >= date(?, '-11 months', 'start of month')
+       GROUP BY ym ORDER BY ym`,
+    ).bind(code, win).all<{ ym: string; sales: number; waste: number; shrink: number }>(),
+    // Lens 2 — FIM article totals + this article's earliest FIM date.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(net_sales_zar),0) sales, COALESCE(SUM(waste_zar),0) waste,
+              COALESCE(SUM(shrink_zar),0) shrink, COUNT(*) n, MIN(date_from) earliest
+       FROM fim_articles WHERE article_code = ?`,
+    ).bind(code).first<{ sales: number; waste: number; shrink: number; n: number; earliest: string | null }>(),
+    // Earliest FIM article date overall — the "hint" shown when this article has none.
+    env.DB.prepare(`SELECT MIN(date_from) d FROM fim_articles`).first<{ d: string | null }>(),
     env.DB.prepare(
       `SELECT p.po_number, p.order_date, v.vendor_code, v.name vendor, p.order_qty,
             p.sku_qty, p.sku_uom, p.net_price_cents, p.line_value_cents, p.sloc
      FROM po_lines p JOIN articles a ON a.id=p.article_id LEFT JOIN vendors v ON v.id=p.vendor_id
      WHERE a.article_code = ? ORDER BY p.order_date DESC LIMIT 500`,
-    )
-      .bind(code)
-      .all(),
+    ).bind(code).all(),
   ]);
-  // Per-line unit price: net value / SKU units where present, else the per-order
-  // -unit net price (labelled by unit_basis).
-  const historyOut = (history.results ?? []).map((h) => {
-    const hasQ = h.sku_qty != null && h.sku_qty > 0 && h.line_value_cents != null;
+
+  const priceMonthly = (priceRows.results ?? []).map((r) => {
+    const units = Number(r.sku_units ?? 0);
+    const hasSkuM = units > 0;
     return {
-      ...h,
-      unit_price_cents: hasQ ? Math.round(Number(h.line_value_cents) / Number(h.sku_qty)) : h.net_price_cents,
-      unit_basis: hasQ ? "unit" : "order-unit",
+      month: r.ym,
+      unitPriceCents: hasSkuM ? Math.round(Number(r.sku_value ?? 0) / units) : (r.opu == null ? null : Math.round(Number(r.opu))),
+      basis: hasSkuM ? "unit" : "order-unit",
+      sku_uom: r.sku_uom ?? null,
     };
   });
-  return json({ kpis, history: historyOut, lines: lines.results });
+  const grMonthly = (grRows.results ?? []).map((r) => ({ month: r.ym, cost: Math.round(Number(r.cost)), sell: Math.round(Number(r.sell)) }));
+  const fimMonthly = (fimRows.results ?? []).map((r) => ({
+    month: r.ym, sales: Math.round(Number(r.sales)), waste: Math.round(Number(r.waste)), shrink: Math.round(Number(r.shrink)),
+  }));
+  const hasFim = (fimTot?.n ?? 0) > 0;
+
+  return json({
+    kpis: {
+      ...kpis,
+      grCostZar: grTot ? Math.round(Number(grTot.cost)) : 0,
+      grSellZar: grTot ? Math.round(Number(grTot.sell)) : 0,
+      grLines: grTot?.lines ?? 0,
+      lastGrDate: grTot?.last_gr ?? null,
+    },
+    anchor,
+    priceMonthly,
+    grMonthly,
+    // FIM cross-match: null when this article has no FIM rows, with the earliest
+    // date FIM article data exists at all so the UI can hint "from <date>".
+    fim: hasFim
+      ? { sales: Math.round(Number(fimTot!.sales)), waste: Math.round(Number(fimTot!.waste)), shrink: Math.round(Number(fimTot!.shrink)), earliest: fimTot!.earliest }
+      : null,
+    fimMonthly,
+    fimEarliestGlobal: fimGlobal?.d ?? null,
+    lines: lines.results,
+  });
 }
 
 /** GET /api/categories — merchandise-category aggregate. */
