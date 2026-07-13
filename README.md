@@ -282,3 +282,29 @@ curl "…/api/settlement/liv?liv=5149590384"   # drill: EOD GR rows + statement 
 > CPU limit; `fim_daily` mixes daily/weekly/monthly `report_type` rows, so read it via
 > the finest-resolution CTE (`fimResolvedCte` in `src/analytics.ts`) rather than raw
 > `date_from>=? AND date_to<=?` containment.
+
+## Statement analytics (Cash & Creditors)
+
+`/#cash` is the statement dashboard, driven by `/api/statements/dashboard` +
+`/api/statements/lines` (`src/statements-analytics.ts`):
+
+- **Payments due** — each statement's `total_due` is payable on its `due_date`.
+  A statement is PAID when a later statement carries a payment line matching its
+  `total_due` (±R1) — plus a FIFO settlement reconciliation (payments clear oldest
+  dues first) so lump-sum-paid old statements don't show as false overdue. The
+  panel shows the next payment (the latest statement's obligation), the unpaid
+  schedule, total outstanding, and overdue.
+- **Balance trend** — closing balance per week across all statements, chained from
+  the few PRINTED anchors (`closing = opening + Σ lines`); printed points render as
+  diamonds, derived as dots.
+- **Funding** — purchases (invoices) vs credits, with credits-as-%-of-purchases
+  (the funding rate); credit decomposition by type (swell / bonus buy / rebate /
+  loyalty / promo-funding / other); fixed charges (franchise fee + loyalty) by
+  month; swell-by-department parsed from `*1.500% F05 Swell MA15` vendor text with
+  rebate-completeness gap flags; interest lines flagged (should be zero).
+- **Line browser** — filter by statement / date / type / vendor / text, sortable,
+  with per-type subtotals. Every chart drills into it (a `[data-drill]` segment sets
+  `#cash?week=&type=` and pre-filters the browser).
+
+A **PnP Account** dashboard tile shows current balance, next payment due, and an
+overdue badge, linking to this screen.
