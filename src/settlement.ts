@@ -291,13 +291,27 @@ export async function handleSettlement(req: Request, env: Env): Promise<Response
   const sum = (arr: typeof rows, k: string) => rnd(arr.reduce((a, r) => a + Number(r[k] ?? 0), 0));
 
   // Claims = per-LIV GR−LIV variance beyond tolerance (R5 direct / R2000 DC).
+  // Confidence: a single-GR-row LIV's variance is exactly SAP's own GR-LIV figure —
+  // CONFIRMED. Multi-GR-row LIVs are aggregated per the spec, but a mis-tagged
+  // liv_doc (two POs sharing one LIV, common on partial-week EOD) can inflate the
+  // variance — flag needsVerify so those are checked via the drill before raising.
   const claims = eod
     .filter((r) => r.variance_zar != null && Math.abs(Number(r.variance_zar)) > (r.is_direct ? TOL_DIRECT : TOL_DC))
-    .map((r) => ({
-      po_number: r.po_number, liv_doc: r.match_key, supplier_name: r.supplier_name,
-      grTotal: rnd(r.eod_gr_total), livValue: rnd(r.eod_liv_value), billed: r.statement_amount != null ? rnd(r.statement_amount) : null,
-      variance: rnd(r.variance_zar), isDirect: !!r.is_direct, status: r.status,
-    }));
+    .map((r) => {
+      const grCount = Number(r.gr_count ?? 0);
+      const livVal = Number(r.eod_liv_value ?? 0);
+      const varZ = Number(r.variance_zar ?? 0);
+      // Suspicious if multiple GR rows AND the variance is a large share of the invoice.
+      const needsVerify = grCount > 1 && livVal > 0 && Math.abs(varZ) > 0.5 * livVal;
+      return {
+        po_number: r.po_number, liv_doc: r.match_key, supplier_name: r.supplier_name,
+        grTotal: rnd(r.eod_gr_total), livValue: rnd(r.eod_liv_value), billed: r.statement_amount != null ? rnd(r.statement_amount) : null,
+        variance: rnd(r.variance_zar), isDirect: !!r.is_direct, status: r.status,
+        grCount, confidence: needsVerify ? "verify" : "confirmed",
+      };
+    })
+    // Confirmed claims first, then by size — the actionable list surfaces at the top.
+    .sort((a, b) => (a.confidence === b.confidence ? Math.abs(b.variance) - Math.abs(a.variance) : a.confidence === "confirmed" ? -1 : 1));
 
   return json({
     week,

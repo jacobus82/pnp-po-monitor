@@ -2185,11 +2185,14 @@ function stClaimsTable(claims){
   if(!claims.length)return '<div class="muted small" style="padding:10px">No billing variances beyond tolerance this week.</div>';
   var rows=claims.map(function(c){
     var vcls=(c.variance||0)<0?"neg":"pos";
-    return '<tr data-liv="'+esc(c.liv_doc)+'" style="cursor:pointer"><td>'+esc(c.supplier_name||"")+'</td><td class="small">'+esc(c.po_number||"")+'</td><td class="small">'+esc(c.liv_doc)+'</td>'
-      +'<td class="num">'+Rr(c.grTotal)+'</td><td class="num">'+Rr(c.livValue)+'</td><td class="num">'+(c.billed!=null?Rr(c.billed):"\\u2014")+'</td>'
+    var conf=c.confidence==="verify"
+      ? '<span class="pill TIGHT" title="Multiple GR rows share this LIV \\u2014 possible mis-tag. Click to verify before raising.">verify</span>'
+      : '<span class="small" style="color:var(--green)" title="Single-invoice variance = SAP\\u2019s own GR-LIV figure.">\\u2713</span>';
+    return '<tr data-liv="'+esc(c.liv_doc)+'" style="cursor:pointer"><td>'+conf+'</td><td>'+esc(c.supplier_name||"")+'</td><td class="small">'+esc(c.po_number||"")+'</td><td class="small">'+esc(c.liv_doc)+'</td>'
+      +'<td class="num">'+Rr(c.grTotal)+(c.grCount>1?' <span class="muted small">('+c.grCount+' GR)</span>':'')+'</td><td class="num">'+Rr(c.livValue)+'</td><td class="num">'+(c.billed!=null?Rr(c.billed):"\\u2014")+'</td>'
       +'<td class="num '+vcls+'" style="font-weight:700">'+Rr(c.variance)+'</td><td class="small muted">'+(c.isDirect?"direct":"DC")+'</td></tr>';
   }).join("");
-  return '<div class="tablewrap"><table><thead><tr><th>Vendor</th><th>PO</th><th>LIV</th><th class="num">GR total</th><th class="num">LIV value</th><th class="num">Billed</th><th class="num">Variance</th><th>Tol</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
+  return '<div class="tablewrap"><table><thead><tr><th></th><th>Vendor</th><th>PO</th><th>LIV</th><th class="num">GR total</th><th class="num">LIV value</th><th class="num">Billed</th><th class="num">Variance</th><th>Tol</th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
 function stUninvoicedTable(rows){
   if(!rows.length)return '<div class="muted small" style="padding:8px">Nothing received-but-unbilled this week.</div>';
