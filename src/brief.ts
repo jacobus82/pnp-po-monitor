@@ -71,12 +71,20 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
          AND date(g.gr_date,'+' || ?1 || ' days') <= date('now','+14 days')
        GROUP BY g.gr_date HAVING val>0 ORDER BY dueDate`,
     ).bind(String((await env.DB.prepare(`SELECT value FROM app_settings WHERE key='vencor_terms_days'`).first<{ value: string }>())?.value ?? "14")).all<{ grDate: string; dueDate: string; val: number; vendorName: string | null }>(),
-    // Money back — confirmed overbilled claims (single-GR-row, beyond tol, store-wide).
-    env.DB.prepare(`SELECT COUNT(*) n, ROUND(SUM(-variance_zar),2) total FROM settlement_ledger WHERE side='eod' AND gr_count=1 AND variance_zar<0 AND ABS(variance_zar)>(CASE WHEN is_direct=1 THEN 5 ELSE 2000 END)`).first<{ n: number; total: number }>(),
-    // Uninvoiced GR aged > 14 days.
-    env.DB.prepare(`SELECT COUNT(*) n, ROUND(SUM(eod_gr_total),2) total FROM settlement_ledger WHERE side='eod' AND status IN ('OPEN','AGED') AND aging_days>14`).first<{ n: number; total: number }>(),
-    // Returns without credit.
-    env.DB.prepare(`SELECT COUNT(*) n, ROUND(SUM(-return_value),2) total FROM return_credits WHERE status!='CREDITED' AND return_value<0`).first<{ n: number; total: number }>(),
+    // Money back — TOTAL still open (all weeks) + ARISING this week (scoped). The
+    // open total must never disappear from the Brief even when a week has no EOD.
+    env.DB.prepare(`SELECT
+        COUNT(*) n, ROUND(SUM(-variance_zar),2) total,
+        SUM(CASE WHEN week_code=?1 THEN 1 ELSE 0 END) wkN, ROUND(SUM(CASE WHEN week_code=?1 THEN -variance_zar ELSE 0 END),2) wkTotal
+      FROM settlement_ledger WHERE side='eod' AND gr_count=1 AND variance_zar<0 AND ABS(variance_zar)>(CASE WHEN is_direct=1 THEN 5 ELSE 2000 END)`).bind(code).first<{ n: number; total: number; wkN: number; wkTotal: number }>(),
+    env.DB.prepare(`SELECT
+        COUNT(*) n, ROUND(SUM(eod_gr_total),2) total,
+        SUM(CASE WHEN week_code=?1 THEN 1 ELSE 0 END) wkN, ROUND(SUM(CASE WHEN week_code=?1 THEN eod_gr_total ELSE 0 END),2) wkTotal
+      FROM settlement_ledger WHERE side='eod' AND status IN ('OPEN','AGED') AND aging_days>14`).bind(code).first<{ n: number; total: number; wkN: number; wkTotal: number }>(),
+    env.DB.prepare(`SELECT
+        COUNT(*) n, ROUND(SUM(-return_value),2) total,
+        SUM(CASE WHEN week_code=?1 THEN 1 ELSE 0 END) wkN, ROUND(SUM(CASE WHEN week_code=?1 THEN -return_value ELSE 0 END),2) wkTotal
+      FROM return_credits WHERE status!='CREDITED' AND return_value<0`).bind(code).first<{ n: number; total: number; wkN: number; wkTotal: number }>(),
     env.DB.prepare(`SELECT nps_tw, nps_computed FROM fan_score_weeks WHERE week_ending BETWEEN ? AND ?`).bind(ws, we).first<{ nps_tw: number | null; nps_computed: number | null }>(),
     env.DB.prepare(`SELECT COALESCE(SUM(l.amount),0) amt, COUNT(*) n FROM statement_lines l JOIN statements s ON s.statement_no=l.statement_no WHERE lower(l.vendor_text) LIKE '%interest%' AND s.cut_off BETWEEN ? AND ?`).bind(ws, we).first<{ amt: number; n: number }>(),
     env.DB.prepare(`SELECT COUNT(*) n FROM anomalies WHERE resolved=0`).first<{ n: number }>(),
@@ -116,10 +124,32 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   const storeCos = fim.reduce((s, d) => s + d.cos, 0);
   const storeBudget = savedStore?.sales_budget_zar != null ? savedStore.sales_budget_zar : tradingDepts.reduce((s, d) => s + d.budget, 0);
   const storeLy = lyFim.reduce((s, d) => s + d.sales, 0);
-
-  // ---- Loss ----
   const storeWaste = fim.reduce((s, d) => s + d.waste, 0);
   const storeShrink = fim.reduce((s, d) => s + d.shrink, 0);
+
+  // ---- GP bridge: Budget GP → Actual GP, decomposed so the components sum to
+  // (actual − budget) GP exactly. Margin-rate is the balancing item (absorbs
+  // rounding); waste/shrink components equal the Loss section's R values. ----
+  const m = requiredMarginPct / 100;
+  const budgetGp = r0(storeBudget * m);
+  const actualGp = storeSales - storeCos - storeWaste - storeShrink; // GP after losses (rand)
+  const salesVar = r0((storeSales - storeBudget) * m); // sales volume/price at target margin
+  const wasteComp = -storeWaste, shrinkComp = -storeShrink;
+  const marginRateComp = actualGp - budgetGp - salesVar - wasteComp - shrinkComp; // balances exactly
+  const gpBridge = {
+    budgetGp, actualGp,
+    components: [
+      { key: "salesVar", label: "Sales variance", value: salesVar },
+      { key: "marginRate", label: "Margin rate", value: marginRateComp },
+      { key: "waste", label: "Waste", value: wasteComp },
+      { key: "shrink", label: "Shrink", value: shrinkComp },
+    ],
+    // Assertion (should be 0): Σcomponents − (actual − budget).
+    assertionResidual: (salesVar + marginRateComp + wasteComp + shrinkComp) - (actualGp - budgetGp),
+    ties: true, requiredMarginPct,
+  };
+
+  // ---- Loss ---- (storeWaste/storeShrink computed above for the GP bridge)
   const lossDepts = fim.map((d) => ({
     dept: d.dept_code, name: d.dept_name, sales: d.sales,
     waste: d.waste, wastePct: pct(d.waste, d.sales), shrink: d.shrink, shrinkPct: pct(d.shrink, d.sales),
@@ -167,6 +197,7 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
       },
       depts: tradingDepts,
     },
+    gpBridge: { ...gpBridge, complete: fimComplete },
     loss: {
       complete: fimComplete, threshold: WASTE_THRESHOLD,
       store: { sales: r0(storeSales), waste: r0(storeWaste), wastePct: pct(storeWaste, storeSales), shrink: r0(storeShrink), shrinkPct: pct(storeShrink, storeSales) },
@@ -175,9 +206,10 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
     },
     moneyOut: { pnp: pnpDue, vencor, overdue: payments.overdue, pnpTermsNote: "PnP statement obligations; Vencor 14-day terms from GR" },
     moneyBack: {
-      claims: { count: claimsRow?.n ?? 0, total: claimsRow?.total ?? 0 },
-      uninvoicedGr: { count: uninvRow?.n ?? 0, total: uninvRow?.total ?? 0 },
-      returnsNoCredit: { count: returnsRow?.n ?? 0, total: returnsRow?.total ?? 0 },
+      // totalOpen = all weeks (never disappears); thisWeek = arising in this week.
+      claims: { count: claimsRow?.n ?? 0, total: claimsRow?.total ?? 0, thisWeekCount: claimsRow?.wkN ?? 0, thisWeekTotal: claimsRow?.wkTotal ?? 0 },
+      uninvoicedGr: { count: uninvRow?.n ?? 0, total: uninvRow?.total ?? 0, thisWeekCount: uninvRow?.wkN ?? 0, thisWeekTotal: uninvRow?.wkTotal ?? 0 },
+      returnsNoCredit: { count: returnsRow?.n ?? 0, total: returnsRow?.total ?? 0, thisWeekCount: returnsRow?.wkN ?? 0, thisWeekTotal: returnsRow?.wkTotal ?? 0 },
     },
     watch: {
       anomalyCount: anomRow?.n ?? 0,

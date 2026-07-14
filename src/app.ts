@@ -306,6 +306,7 @@ var NAV=[
  ["shortage","\\uD83D\\uDCC9","Shortages"],
  ["purchase-orders","\\uD83D\\uDCD1","Purchase Orders"],
  ["budgets","\\uD83C\\uDFAF","Weekly Budgets"],
+ ["otb","\\uD83D\\uDED2","Open-to-Buy"],
  ["open","\\uD83D\\uDCCB","Open Orders"],
  ["returns","\\u21A9","Returns to Vendor"],
  ["anomalies","\\u26A0","Risk & Anomalies"],
@@ -322,7 +323,7 @@ var NAV=[
 // per-group in localStorage under "nav-<group id>" (default expanded).
 var NAV_GROUPS=[
  {id:"g-overview",label:"Overview",items:["dashboard","brief","trading","weekly","monthly","fy","customers","fanscore"]},
- {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","open","returns","gr","vendors","cash","settlement"]},
+ {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","otb","open","returns","gr","vendors","cash","settlement"]},
  {id:"g-analysis",label:"Analysis",items:["articles","categories","departments","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
  {id:"g-admin",label:"Admin",items:["upload","coverage","settings","export"]}
 ];
@@ -916,17 +917,20 @@ function dashLoadThisWeek(){
   var el=$("dashTWbody");if(!el)return;
   api("/api/feed-coverage?weeks=2").then(function(cov){
     var cur=cov.currentWeek;
-    return api("/api/brief?week="+encodeURIComponent(cur)).then(function(d){
+    return Promise.all([api("/api/brief?week="+encodeURIComponent(cur)),api("/api/otb")]).then(function(r){
+      var d=r[0],otb=r[1],os=otb.store;
       var ts=d.trading.store,de=d.week.daysElapsed||0;
       var fimOk=(d.coverage&&d.coverage.fim&&d.coverage.fim.status)!=="red";
       var budgetToDate=Math.round((ts.budget||0)*de/7);
       var salesVar=(fimOk&&budgetToDate>0)?Math.round((ts.sales-budgetToDate)/budgetToDate*1000)/10:null;
       var lk=$("dashTWlink");if(lk)lk.textContent=d.week.code+" \\u00b7 day "+de+"/7";
+      var otbCol=os.deptsOver>0?"var(--red)":"var(--nav)";
       el.innerHTML='<div class="cards kpis">'
         +kpi("Sales to date",fimOk?Rr0(ts.sales):'<span class="muted">awaiting FIM</span>',(salesVar!=null?(salesVar>=0?"+":"")+salesVar+"% vs pro-rata budget":(fimOk?"":"data not loaded yet")))
         +kpi("Budget to date",Rr0(budgetToDate),"of "+Rr0(ts.budget)+" ("+de+"/7 days)")
         +kpi("POs placed",Rr0(d.posPlacedZar||0),"this week")
-        +'</div><div class="small" style="margin-top:6px"><a class="link" href="#brief">\\uD83D\\uDCCB Open the Weekly Operating Brief \\u2192</a></div>';
+        +clikKpiB("Open-to-buy",'<span style="color:'+otbCol+'">'+Rr0(os.otb)+'</span>',(os.deptsOver>0?'<span class="neg">'+os.deptsOver+' dept(s) over budget</span>':"all within budget")+" \\u00b7 "+otb.week.code,"otb")
+        +'</div><div class="small" style="margin-top:6px"><a class="link" href="#brief">\\uD83D\\uDCCB Open the Weekly Operating Brief \\u2192</a> &nbsp; <a class="link" href="#otb">\\uD83D\\uDED2 Open-to-Buy \\u2192</a></div>';
     });
   }).catch(function(){var el=$("dashTWbody");if(el)el.innerHTML='<div class="muted small">This-week data unavailable.</div>'});
 }
@@ -1319,8 +1323,10 @@ PAGES.trading=function(){
 };
 
 // ---- Purchase Orders: filterable, paginated PO-line list (/api/po-lines/list) ----
-var PO_STATE={period:"month",status:"all",vendor:"",dept:"",offset:0,limit:100};
+var PO_STATE={period:"month",status:"all",vendor:"",dept:"",from:"",to:"",offset:0,limit:100};
 PAGES["purchase-orders"]=function(){
+  var rp=routeParams();
+  if(rp.dept||rp.from||rp.to){PO_STATE.dept=rp.dept||"";PO_STATE.from=rp.from||"";PO_STATE.to=rp.to||"";PO_STATE.period=(rp.from&&rp.to)?"custom":PO_STATE.period;PO_STATE.status="all";PO_STATE.offset=0;}
   var pOpts=[["week","This week"],["month","This month"],["fy","This FY"],["lastfy","Last FY"],["custom","All data"]];
   var sOpts=[["all","All lines"],["open","Open only"],["matched","Matched (received)"],["unmatched-po","Unmatched PO"]];
   var bar='<div class="toolbar">'
@@ -1330,7 +1336,7 @@ PAGES["purchase-orders"]=function(){
     +'<input class="inp" id="poDept" placeholder="Dept" value="'+esc(PO_STATE.dept)+'" style="width:80px">'
     +'<button class="btn" id="poApply">Apply</button></div>';
   setHTML(bar+'<div id="poSummary" class="muted small" style="margin-bottom:8px"></div><div id="poBody"><div class="loading">Loading\\u2026</div></div>');
-  $("poApply").onclick=function(){PO_STATE.period=$("poPeriod").value;PO_STATE.status=$("poStatus").value;PO_STATE.vendor=$("poVendor").value.trim();PO_STATE.dept=$("poDept").value.trim();PO_STATE.offset=0;poLoad()};
+  $("poApply").onclick=function(){PO_STATE.period=$("poPeriod").value;PO_STATE.status=$("poStatus").value;PO_STATE.vendor=$("poVendor").value.trim();PO_STATE.dept=$("poDept").value.trim();PO_STATE.from="";PO_STATE.to="";PO_STATE.offset=0;poLoad()};
   poLoad();
 };
 // 5 summary cards for the PO screen: Gross / Returns / Net (headline) / Open / Vendors.
@@ -1360,7 +1366,9 @@ function poReturnsCard(rbv){
 }
 function poLoad(){
   var body=$("poBody");if(!body)return;body.innerHTML='<div class="loading">Loading\\u2026</div>';
-  var q="period="+encodeURIComponent(PO_STATE.period)+"&status="+encodeURIComponent(PO_STATE.status)+"&limit="+PO_STATE.limit+"&offset="+PO_STATE.offset;
+  // An explicit from/to (e.g. an OTB drill for a specific week) overrides the period preset.
+  var q=(PO_STATE.from&&PO_STATE.to)?("from="+PO_STATE.from+"&to="+PO_STATE.to):("period="+encodeURIComponent(PO_STATE.period));
+  q+="&status="+encodeURIComponent(PO_STATE.status)+"&limit="+PO_STATE.limit+"&offset="+PO_STATE.offset;
   if(PO_STATE.vendor)q+="&vendor="+encodeURIComponent(PO_STATE.vendor);
   if(PO_STATE.dept)q+="&dept="+encodeURIComponent(PO_STATE.dept);
   api("/api/po-lines/list?"+q).then(function(d){
@@ -2314,9 +2322,48 @@ PAGES.coverage=function(){loading();api("/api/feed-coverage?weeks=16").then(func
   setHTML(stale+grid);
 }).catch(errBox)};
 
+// ---- Open-to-Buy (#otb): /api/otb (Brief 8) — live forward purchase control ----
+PAGES.otb=function(){var rp=routeParams();window._otbWeek=rp.week||"";loading();otbLoad();};
+function otbLoad(){
+  var qs=window._otbWeek?("?week="+encodeURIComponent(window._otbWeek)):"";
+  Promise.all([api("/api/otb"+qs),loadPeriods()]).then(function(res){
+    var d=res[0],per=res[1];var s=d.store,wk=d.week;window._otbWeek=wk.code;
+    var weeks=(per.weeks||[]);
+    var sel='<select class="sel" id="otbWeek" onchange="window._otbWeek=this.value;otbLoad()">'+weeks.map(function(x){var c=x.label.split(" ")[0];return '<option value="'+esc(c)+'"'+(c===wk.code?" selected":"")+'>'+esc(x.label)+'</option>'}).join("")+'</select>';
+    var overCol=s.deptsOver>0?"var(--red)":"var(--green)";
+    var h='<div class="toolbar" style="gap:10px;flex-wrap:wrap"><label class="small muted">Week (live control) '+sel+'</label><span class="small muted">day '+wk.daysElapsed+'/7 \\u00b7 '+wk.elapsedPct+'% elapsed</span></div>';
+    h+='<div class="cards kpis">'
+      +kpi("Purchase budget",Rr0(s.budget),esc(s.budgetSource))
+      +kpi("POs placed",Rr0(s.placed),s.consumedPct+"% consumed (vs "+wk.elapsedPct+"% elapsed)")
+      +kpi("Remaining OTB",'<span style="color:'+(s.otb<0?"var(--red)":"var(--nav)")+'">'+Rr0(s.otb)+'</span>',null)
+      +kpi("Depts over budget",'<span style="color:'+overCol+'">'+s.deptsOver+'</span>',s.deptsOver>0?"stop ordering":"within budget")+'</div>';
+    h+='<div class="card" style="margin-top:14px"><h2>Open-to-buy by department <span class="muted small">worst first \\u00b7 red over budget \\u00b7 amber pacing ahead \\u00b7 click a dept for its POs this week</span></h2>'
+      +'<div class="tablewrap"><table><thead><tr><th>Dept</th><th class="num">Budget</th><th class="num">Placed</th><th class="num">Remaining OTB</th><th class="num">Consumed</th><th>Status</th></tr></thead><tbody>'
+      +(d.depts||[]).map(function(r){var col=r.status==="over"?"#fdecea":r.status==="amber"?"#fdf6ec":"";var badge=r.status==="over"?'<span class="pill OVER">OVER</span>':r.status==="amber"?'<span class="pill TIGHT">pacing</span>':'<span class="small muted">ok</span>';
+        return '<tr data-drill="purchase-orders?dept='+esc(r.dept)+'&from='+esc(wk.weekStart)+'&to='+esc(wk.weekEnd)+'" style="cursor:pointer'+(col?';background:'+col:'')+'"><td class="small"><b>'+esc(r.dept)+'</b> '+esc(r.name||"")+'<span class="muted small"> '+(r.budgetSource==="saved"?"":"\\u00b7LY")+'</span></td><td class="num">'+Rr0(r.budget)+'</td><td class="num">'+Rr0(r.placed)+'</td><td class="num '+(r.otb<0?"neg":"")+'">'+Rr0(r.otb)+'</td><td class="num '+(r.status==="over"?"neg":"")+'">'+r.consumedPct+'%</td><td>'+badge+'</td></tr>'}).join("")
+      +'</tbody></table></div><div class="legend">Budget = GR/purchase budget (saved weekly budget, else LY-FIM-generated with Settings growth/margin). Placed = net PO value (S001\\u2212S002) by PO date, aged-out lines excluded.</div></div>';
+    setHTML(h);
+  }).catch(errBox);
+}
+
 // ---- Weekly Operating Brief (#brief): /api/brief (Brief 7 §2) ----
 function briefArrow(a){return a==="up"?'<span class="arrow-up">\\u25B2</span>':a==="down"?'<span class="arrow-down">\\u25BC</span>':'<span class="arrow-flat">\\u2192</span>'}
 function briefWarn(txt){return '<div class="brief-warn">\\u26A0 '+esc(txt)+'</div>'}
+// GP bridge waterfall: Budget GP -> +sales var -> +margin rate -> -waste -> -shrink -> Actual GP.
+function svgWaterfall(g){
+  var comps=g.components||[];var steps=[];var run=g.budgetGp;
+  steps.push({label:"Budget GP",value:g.budgetGp,type:"start",base:0,top:g.budgetGp});
+  comps.forEach(function(c){var base=c.value>=0?run:run+c.value;var top=c.value>=0?run+c.value:run;steps.push({label:c.label,value:c.value,type:c.value>=0?"pos":"neg",base:base,top:top});run+=c.value});
+  steps.push({label:"Actual GP",value:g.actualGp,type:"end",base:0,top:g.actualGp});
+  var W=760,H=280,pad=44,n=steps.length,bw=(W-2*pad)/n*0.6;
+  var vals=steps.reduce(function(a,s){a.push(s.base,s.top);return a},[]);var mx=Math.max.apply(null,vals),mn=Math.min.apply(null,vals);mn=Math.min(mn,0);var sp=(mx-mn)||1;mx+=sp*0.08;
+  function X(i){return pad+i*(W-2*pad)/n+((W-2*pad)/n-bw)/2}function Y(v){return H-pad-((v-mn)/(mx-mn))*(H-2*pad)}
+  var bars=steps.map(function(s,i){var x=X(i),y=Y(Math.max(s.base,s.top)),h=Math.abs(Y(s.base)-Y(s.top));var col=s.type==="start"?"#2E6CA8":s.type==="end"?"#1b4a72":s.type==="pos"?"#2E7D32":"#BE1D37";
+    var lbl='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(y-4).toFixed(1)+'" font-size="9" font-weight="700" text-anchor="middle" fill="'+col+'">'+(s.value>=0?"":"\\u2212")+Rr0(Math.abs(s.value))+'</text>';
+    var xl='<text x="'+(x+bw/2).toFixed(1)+'" y="'+(H-pad+14)+'" font-size="8.5" text-anchor="middle" fill="#6a7480">'+esc(s.label)+'</text>';
+    return '<rect x="'+x.toFixed(1)+'" y="'+y.toFixed(1)+'" width="'+bw.toFixed(1)+'" height="'+Math.max(1,h).toFixed(1)+'" fill="'+col+'" rx="2"><title>'+esc(s.label)+": "+Rr(s.value)+'</title></rect>'+lbl+xl}).join("");
+  return '<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+Y(0).toFixed(1)+'" x2="'+(W-pad)+'" y2="'+Y(0).toFixed(1)+'" stroke="#e2e7ec"/>'+bars+'</svg></div>';
+}
 function vpct(v){return v==null?"\\u2014":(v>=0?"+":"")+v+"%"}
 PAGES.brief=function(){var rp=routeParams();window._briefWeek=rp.week||"";window._briefMargin=rp.margin||"";loading();briefLoad();};
 function briefLoad(){
@@ -2346,6 +2393,13 @@ function briefLoad(){
       +(t.depts||[]).map(function(x){return '<tr data-drill="departments"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.gpPct!=null?x.gpPct+"%":"\\u2014")+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
       +'</tbody></table></div></div>';
 
+    // ===== GP BRIDGE (waterfall) =====
+    if(d.gpBridge){var g=d.gpBridge;
+      h+='<div class="card brief-sec"><h2>GP bridge <span class="muted small">budget \\u2192 actual gross profit</span></h2>';
+      if(!g.complete)h+=briefWarn("FIM incomplete \\u2014 GP bridge is partial.");
+      h+=svgWaterfall(g)+'<div class="small muted" style="margin-top:4px">Budget GP '+Rr0(g.budgetGp)+' + sales variance + margin rate \\u2212 waste \\u2212 shrink = Actual GP '+Rr0(g.actualGp)+'. Components reconcile to the rand'+(g.assertionResidual===0?" (\\u2713 ties)":" (residual "+g.assertionResidual+")")+'. Waste/shrink match the Loss section.</div></div>';
+    }
+
     // ===== 2. LOSS =====
     var l=d.loss,ls=l.store;
     h+='<div class="card brief-sec"><h2>2 \\u00b7 Loss <span class="muted small">waste &amp; shrink vs '+l.threshold+'% of sales</span></h2>';
@@ -2369,13 +2423,14 @@ function briefLoad(){
     if((mo.overdue||[]).length)h+=briefWarn((mo.overdue.length)+" statement(s) overdue: "+mo.overdue.map(function(o){return o.code+" "+Rr0(o.totalDue)}).join(", "));
     h+='</div>';
 
-    // ===== 4. MONEY BACK =====
+    // ===== 4. MONEY BACK ===== (both: arising this week + total still open)
     var mb=d.moneyBack;
-    h+='<div class="card brief-sec"><h2>4 \\u00b7 Money back <span class="muted small">recovery opportunities</span></h2><div class="cards kpis">'
-      +clikKpiB("Confirmed claims",Rr0(mb.claims.total),mb.claims.count+" overbilled LIVs","settlement")
-      +clikKpiB("Uninvoiced GR &gt;14d",Rr0(mb.uninvoicedGr.total),mb.uninvoicedGr.count+" receipts","settlement")
-      +clikKpiB("Returns w/o credit",Rr0(mb.returnsNoCredit.total),mb.returnsNoCredit.count+" returns","settlement")+'</div>'
-      +'<div class="legend">Click through to Settlement to raise. Figures are store-wide across loaded EOD weeks.</div></div>';
+    function mbSub(o){return "arising this week "+Rr0(o.thisWeekTotal||0)+" ("+(o.thisWeekCount||0)+") \\u00b7 <b>total open "+Rr0(o.total)+" ("+o.count+")</b>"}
+    h+='<div class="card brief-sec"><h2>4 \\u00b7 Money back <span class="muted small">recovery opportunities \\u2014 this week &amp; total still open</span></h2><div class="cards kpis">'
+      +clikKpiB("Confirmed claims",Rr0(mb.claims.total),mbSub(mb.claims),"settlement")
+      +clikKpiB("Uninvoiced GR &gt;14d",Rr0(mb.uninvoicedGr.total),mbSub(mb.uninvoicedGr),"settlement")
+      +clikKpiB("Returns w/o credit",Rr0(mb.returnsNoCredit.total),mbSub(mb.returnsNoCredit),"settlement")+'</div>'
+      +'<div class="legend">Headline = total still open (all weeks) \\u2014 never disappears. Sub-line splits out what arose this week. Click through to Settlement to raise.</div></div>';
 
     // ===== 5. WATCH =====
     var wt=d.watch;
@@ -2642,7 +2697,8 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
   function f(key,label,suffix){return '<div class="hbar" style="grid-template-columns:240px 160px 1fr"><span class="lab">'+label+'</span><input class="inp" id="set_'+key+'" value="'+esc(s[key]||"")+'"><span class="muted small">'+(suffix||"")+'</span></div>'}
   var form='<div class="card"><h2>Budget & assumptions</h2>'
     +f("monthly_turnover_target","Monthly turnover target","Rand")
-    +f("target_gp_pct","Target GP %","percent")
+    +f("target_gp_pct","Target GP % (required margin)","percent \\u2014 used by OTB, GP bridge &amp; budget generation")
+    +f("budget_growth_pct","Budget sales growth %","percent (default 5) \\u2014 LY-FIM budget generation")
     +f("weekly_cap","Weekly purchase cap","Rand (e.g. 2000000)")
     +f("monthly_salary_zar","Monthly salary cost","Rand (for cash-flow risk)")
     +f("price_alert_threshold_pct","Price change alert threshold","percent (default 5)")
@@ -2651,7 +2707,7 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
     +f("pnp_terms_days","PnP Corporate payment terms","days after week-end (28)")
     +f("open_po_max_age_days","Auto-close open POs after","days (default 90 \\u2014 older open lines drop off Open/Committed)")
     +'<div style="margin-top:10px"><button class="btn" onclick="saveSettings()">Save settings</button> <span id="set_msg" class="small muted"></span></div></div>';
-  window._setKeys=["monthly_turnover_target","target_gp_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days"];
+  window._setKeys=["monthly_turnover_target","target_gp_pct","budget_growth_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days"];
   var gl='<div class="card" style="margin-top:14px"><h2>Department guideline margins</h2>'+makeTable([
     {key:"dept_code",label:"Dept"},{key:"dept_name",label:"Name"},{key:"dept_group",label:"Group"},
     {key:"guideline_margin_pct",label:"Guideline %",num:true,html:function(r){return '<input class="inp" style="width:80px;text-align:right" value="'+r.guideline_margin_pct+'" onchange="saveGuideline(\\''+r.dept_code+'\\',this.value)">'}},

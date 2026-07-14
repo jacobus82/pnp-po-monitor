@@ -6,6 +6,7 @@ import { recomputeSettlement, handleSettlement, handleSettlementLiv } from "./se
 import { handleStatementDashboard, handleStatementBrowse } from "./statements-analytics";
 import { handleFeedCoverage } from "./coverage";
 import { handleWeeklyBrief } from "./brief";
+import { handleOtb, recomputeOtbAnomalies } from "./otb";
 import { parseFimFile, aggregateCpToDept } from "./parser/fimParser";
 import { parseCustomerFile } from "./parser/customerParser";
 import { parseFanScoreFile } from "./parser/fanScoreParser";
@@ -273,6 +274,8 @@ async function handleUpload(req: Request, env: Env): Promise<Response> {
         step = "recompute-receipts";
         await recomputeReceipts(env);
         await recomputeStaleAnomalies(env);
+        // Placing POs can push a dept over its purchase budget → OTB_EXCEEDED.
+        try { await recomputeOtbAnomalies(env); } catch { /* best-effort */ }
       }
       const anomalies = [];
       for (const row of inserted) anomalies.push(...detectLineAnomalies(row, env));
@@ -1286,6 +1289,11 @@ function deriveAnomalyDrill(
       const wc = d.weekCode != null ? String(d.weekCode) : null;
       const wk = wc ? weekMap.get(wc) : null;
       return { refDate: wk?.end ?? null, drill: wk ? `weekly?from=${enc(wk.start)}&to=${enc(wk.end)}` : null };
+    }
+    case "OTB_EXCEEDED": {
+      const wc = d.week != null ? String(d.week) : null;
+      const wk = wc ? weekMap.get(wc) : null;
+      return { refDate: wk?.end ?? null, drill: wc ? `otb?week=${enc(wc)}` : "otb" };
     }
     case "NEGATIVE_MARGIN":
     case "LOW_MARGIN":
@@ -2415,6 +2423,7 @@ export default {
       if (path === "/api/statements/lines" && m === "GET") return await handleStatementBrowse(req, env);
       if (path === "/api/feed-coverage" && m === "GET") return await handleFeedCoverage(req, env);
       if (path === "/api/brief" && m === "GET") return await handleWeeklyBrief(req, env);
+      if (path === "/api/otb" && m === "GET") return await handleOtb(req, env);
       if (path === "/api/reconcile/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
         await recomputeReceipts(env);
@@ -2428,13 +2437,15 @@ export default {
         } catch {
           /* budget anomaly write is best-effort; rollups already committed */
         }
-        return json({ status: "ok", recomputed: true, staleAnomalies, priceSpikes, budget: budget.evaluations });
+        const otbExceeded = await recomputeOtbAnomalies(env);
+        return json({ status: "ok", recomputed: true, staleAnomalies, priceSpikes, otbExceeded, budget: budget.evaluations });
       }
       if (path === "/api/anomalies/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
         const staleAnomalies = await recomputeStaleAnomalies(env);
         const priceSpikes = await recomputePriceSpikes(env);
-        return json({ status: "ok", staleAnomalies, priceSpikes });
+        const otbExceeded = await recomputeOtbAnomalies(env);
+        return json({ status: "ok", staleAnomalies, priceSpikes, otbExceeded });
       }
       // Backfill fim_articles from the archived FIM files (article waste isn't
       // stored by older uploads). Paginated to stay under the Worker CPU/time
