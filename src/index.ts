@@ -4,6 +4,7 @@ import { parseGrFile } from "./parser/grParser";
 import { parseEodFile } from "./parser/eodParser";
 import { recomputeSettlement, handleSettlement, handleSettlementLiv } from "./settlement";
 import { handleStatementDashboard, handleStatementBrowse } from "./statements-analytics";
+import { handleFeedCoverage } from "./coverage";
 import { parseFimFile, aggregateCpToDept } from "./parser/fimParser";
 import { parseCustomerFile } from "./parser/customerParser";
 import { parseFanScoreFile } from "./parser/fanScoreParser";
@@ -2411,6 +2412,7 @@ export default {
       if (path === "/api/statements" && m === "GET") return await handleListStatements(env);
       if (path === "/api/statements/dashboard" && m === "GET") return await handleStatementDashboard(env);
       if (path === "/api/statements/lines" && m === "GET") return await handleStatementBrowse(req, env);
+      if (path === "/api/feed-coverage" && m === "GET") return await handleFeedCoverage(req, env);
       if (path === "/api/reconcile/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
         await recomputeReceipts(env);
