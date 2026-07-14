@@ -330,3 +330,25 @@ POs placed; "awaiting FIM" when the current week hasn't loaded).
 
 > `scripts/check-inline.cjs` syntax-checks the inline SPA `<script>` (which tsc
 > treats as an opaque string) — run it before deploying app.ts changes.
+
+## Open-to-buy + GP bridge (Brief 8)
+
+**Open-to-buy** (`/api/otb?week=`, `src/otb.ts`, screen `#otb`) is forward purchase
+control: per SAP department + store total for a fiscal week, the purchase (GR)
+budget (saved `weekly_budgets` else LY-FIM-generated with the shared growth/margin
+settings), POs placed to date (net S001−S002 by PO date, aged-out lines excluded),
+remaining open-to-buy and % consumed vs % of week elapsed. The screen sorts
+worst-first (red over budget, amber pacing ahead), defaults to the current week
+(live control), and each dept row drills to its POs. The dashboard "This week so
+far" card shows store remaining OTB + count of departments over budget. An
+`OTB_EXCEEDED` anomaly fires (active-purchase week) when a dept's placed POs exceed
+its budget — shown in Risk & Anomalies and the Brief's Watch, drilling to `#otb`.
+
+**GP bridge** (on the Weekly Brief) decomposes Budget GP → Actual GP as a
+waterfall: sales variance (at target margin) + margin rate − waste − shrink. The
+margin-rate item balances so the components reconcile to the rand; the waste/shrink
+components equal the Loss section's values. **Money back** on the Brief shows both
+"arising this week" and the running "total still open" (which never disappears).
+
+`budget_growth_pct` and `target_gp_pct` (Settings) are the single source of the
+growth/margin assumptions used by OTB, the GP bridge and budget generation.
