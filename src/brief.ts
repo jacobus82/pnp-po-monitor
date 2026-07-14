@@ -8,6 +8,7 @@
 import { type Env } from "./config";
 import { computePaymentsDue } from "./statements-analytics";
 import { weekCoverage } from "./coverage";
+import { gpBridge as deptGpBridge } from "./dept";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
@@ -127,27 +128,9 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   const storeWaste = fim.reduce((s, d) => s + d.waste, 0);
   const storeShrink = fim.reduce((s, d) => s + d.shrink, 0);
 
-  // ---- GP bridge: Budget GP → Actual GP, decomposed so the components sum to
-  // (actual − budget) GP exactly. Margin-rate is the balancing item (absorbs
-  // rounding); waste/shrink components equal the Loss section's R values. ----
-  const m = requiredMarginPct / 100;
-  const budgetGp = r0(storeBudget * m);
-  const actualGp = storeSales - storeCos - storeWaste - storeShrink; // GP after losses (rand)
-  const salesVar = r0((storeSales - storeBudget) * m); // sales volume/price at target margin
-  const wasteComp = -storeWaste, shrinkComp = -storeShrink;
-  const marginRateComp = actualGp - budgetGp - salesVar - wasteComp - shrinkComp; // balances exactly
-  const gpBridge = {
-    budgetGp, actualGp,
-    components: [
-      { key: "salesVar", label: "Sales variance", value: salesVar },
-      { key: "marginRate", label: "Margin rate", value: marginRateComp },
-      { key: "waste", label: "Waste", value: wasteComp },
-      { key: "shrink", label: "Shrink", value: shrinkComp },
-    ],
-    // Assertion (should be 0): Σcomponents − (actual − budget).
-    assertionResidual: (salesVar + marginRateComp + wasteComp + shrinkComp) - (actualGp - budgetGp),
-    ties: true, requiredMarginPct,
-  };
+  // ---- GP bridge (shared 5-component model: volume / margin rate / −waste /
+  // −shrink / residual) so the Brief, #gpbridge and dossier all agree. ----
+  const gpBridge = deptGpBridge(storeSales, storeCos, storeWaste, storeShrink, storeBudget, requiredMarginPct);
 
   // ---- Loss ---- (storeWaste/storeShrink computed above for the GP bridge)
   const lossDepts = fim.map((d) => ({

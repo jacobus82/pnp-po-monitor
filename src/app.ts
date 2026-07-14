@@ -297,6 +297,8 @@ var NAV=[
  ["articles","\\uD83D\\uDCE6","Article Analysis"],
  ["categories","\\uD83D\\uDDC2","Category Analysis"],
  ["departments","\\uD83C\\uDFEC","Department Analysis"],
+ ["deptleague","\\uD83C\\uDFC6","Dept League"],
+ ["gpbridge","\\uD83D\\uDCC9","GP Bridge"],
  ["ima","\\uD83D\\uDCCA","Integrated Margin Analysis"],
  ["hierarchy","\\uD83C\\uDF33","Merchandise Hierarchy"],
  ["waste","\\u267B","Waste & Shrinkage"],
@@ -324,7 +326,7 @@ var NAV=[
 var NAV_GROUPS=[
  {id:"g-overview",label:"Overview",items:["dashboard","brief","trading","weekly","monthly","fy","customers","fanscore"]},
  {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","otb","open","returns","gr","vendors","cash","settlement"]},
- {id:"g-analysis",label:"Analysis",items:["articles","categories","departments","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
+ {id:"g-analysis",label:"Analysis",items:["deptleague","departments","gpbridge","articles","categories","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
  {id:"g-admin",label:"Admin",items:["upload","coverage","settings","export"]}
 ];
 
@@ -2340,10 +2342,91 @@ function otbLoad(){
     h+='<div class="card" style="margin-top:14px"><h2>Open-to-buy by department <span class="muted small">worst first \\u00b7 red over budget \\u00b7 amber pacing ahead \\u00b7 click a dept for its POs this week</span></h2>'
       +'<div class="tablewrap"><table><thead><tr><th>Dept</th><th class="num">Budget</th><th class="num">Placed</th><th class="num">Remaining OTB</th><th class="num">Consumed</th><th>Status</th></tr></thead><tbody>'
       +(d.depts||[]).map(function(r){var col=r.status==="over"?"#fdecea":r.status==="amber"?"#fdf6ec":"";var badge=r.status==="over"?'<span class="pill OVER">OVER</span>':r.status==="amber"?'<span class="pill TIGHT">pacing</span>':'<span class="small muted">ok</span>';
-        return '<tr data-drill="purchase-orders?dept='+esc(r.dept)+'&from='+esc(wk.weekStart)+'&to='+esc(wk.weekEnd)+'" style="cursor:pointer'+(col?';background:'+col:'')+'"><td class="small"><b>'+esc(r.dept)+'</b> '+esc(r.name||"")+'<span class="muted small"> '+(r.budgetSource==="saved"?"":"\\u00b7LY")+'</span></td><td class="num">'+Rr0(r.budget)+'</td><td class="num">'+Rr0(r.placed)+'</td><td class="num '+(r.otb<0?"neg":"")+'">'+Rr0(r.otb)+'</td><td class="num '+(r.status==="over"?"neg":"")+'">'+r.consumedPct+'%</td><td>'+badge+'</td></tr>'}).join("")
+        return '<tr data-drill="dept?dept='+esc(r.dept)+'&from='+esc(wk.weekStart)+'&to='+esc(wk.weekEnd)+'" style="cursor:pointer'+(col?';background:'+col:'')+'"><td class="small"><b>'+esc(r.dept)+'</b> '+esc(r.name||"")+'<span class="muted small"> '+(r.budgetSource==="saved"?"":"\\u00b7LY")+'</span></td><td class="num">'+Rr0(r.budget)+'</td><td class="num">'+Rr0(r.placed)+'</td><td class="num '+(r.otb<0?"neg":"")+'">'+Rr0(r.otb)+'</td><td class="num '+(r.status==="over"?"neg":"")+'">'+r.consumedPct+'%</td><td>'+badge+'</td></tr>'}).join("")
       +'</tbody></table></div><div class="legend">Budget = GR/purchase budget (saved weekly budget, else LY-FIM-generated with Settings growth/margin). Placed = net PO value (S001\\u2212S002) by PO date, aged-out lines excluded.</div></div>';
     setHTML(h);
   }).catch(errBox);
+}
+
+// ---- Department League (#deptleague): /api/dept-league (Brief 9 §1) ----
+function pcell(v,red){return v==null?'<span class="muted">\\u2014</span>':'<span'+(red?' class="neg"':'')+'>'+v+'%</span>'}
+function gcell(v){return v==null?'<span class="muted">\\u2014</span>':'<span class="'+(v>=0?"pos":"neg")+'">'+(v>=0?"+":"")+v+'%</span>'}
+var _dlSort="gpVarVsLy",_dlDir=1,_dlData=null,_dlFrom="",_dlTo="";
+PAGES.deptleague=function(){
+  setHTML(periodPickerHTML("dlPer")+'<div id="dlMovers"></div><div id="dlBody"><div class="loading">Loading\\u2026</div></div>');
+  initPeriodPicker("dlPer",function(from,to){_dlFrom=from;_dlTo=to;dlLoad()},"week");
+};
+function dlLoad(){
+  api("/api/dept-league?from="+_dlFrom+"&to="+_dlTo).then(function(d){_dlData=d;dlRenderMovers(d);dlRender()}).catch(function(e){$("dlBody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});
+}
+function dlRenderMovers(d){
+  var mv=d.movers||{};function chip(list,lab,fmt){return '<div class="card" style="flex:1"><div class="small muted" style="font-weight:700">'+lab+'</div>'+(list.length?list.map(function(m){return '<div class="mc-row" data-drill="dept?dept='+esc(m.dept)+'&from='+esc(d.from)+'&to='+esc(d.to)+'" style="cursor:pointer"><span class="mc-l">'+esc(m.dept)+' '+esc(m.name||"")+'</span><span class="mc-v">'+fmt(m)+'</span></div>'}).join(""):'<div class="muted small">\\u2014</div>')+'</div>'}
+  $("dlMovers").innerHTML='<div class="cards g3" style="margin-bottom:12px">'
+    +chip(mv.gainers||[],"\\uD83D\\uDCC8 Growth gainers",function(m){return gcell(m.growthPct)})
+    +chip(mv.decliners||[],"\\uD83D\\uDCC9 Growth decliners",function(m){return gcell(m.growthPct)})
+    +chip(mv.marginDrops||[],"\\u26A0 Margin drops vs LY",function(m){return '<span class="neg">'+m.marginDropPp+'pp</span>'})+'</div>';
+}
+function dlSortBy(k){if(_dlSort===k)_dlDir=-_dlDir;else{_dlSort=k;_dlDir=(k==="gpVarVsLy"||k==="growthPct"||k==="gpPct")?1:-1}dlRender()}
+function dlRender(){
+  var d=_dlData;if(!d)return;var el=$("dlBody");if(!el)return;var rows=d.depts.slice();var thr=d.thresholds||{waste:2,purchToSales:1.05};
+  rows.sort(function(a,b){var x=a[_dlSort],y=b[_dlSort];if(x==null)x=-1e15;if(y==null)y=-1e15;return (x<y?-1:x>y?1:0)*_dlDir});
+  function th(k,lab){return '<th class="num" style="cursor:pointer" onclick="dlSortBy(\\''+k+'\\')">'+lab+(_dlSort===k?(_dlDir>0?" \\u25B4":" \\u25BE"):"")+'</th>'}
+  var st=d.store;
+  var head='<div class="card"><div class="brief-hd"><h2 style="margin:0">Department league <span class="muted small">'+esc(d.from)+' \\u2192 '+esc(d.to)+' \\u00b7 LY '+esc(d.lyFrom)+'</span></h2><div class="small muted">Store sales '+Rr0(st.sales)+' \\u00b7 GP '+Rr0(st.gpR)+' ('+st.gpPct+'%)</div></div></div>';
+  var tbl='<div class="card" style="margin-top:12px"><div class="muted small" style="margin-bottom:6px">Click a column to sort \\u00b7 default worst GP-vs-LY first \\u00b7 click a row for the dossier</div><div class="tablewrap"><table><thead><tr><th>Dept</th>'
+    +th("sales","Sales")+th("sharePct","Share")+th("growthPct","Growth LY")+th("gpPct","GP%")+th("gpR","GP R")+th("gpSharePct","GP share")+th("wastePct","Waste%")+th("shrinkPct","Shrink%")+th("grPurchases","GR purch")+th("purchToSales","P:S")+th("swell","Swell")+th("swellPctOfPurch","Swell%")+th("budgetVarPct","Bud var")+th("gpVarVsLy","GP\\u0394LY")+'</tr></thead><tbody>'
+    +rows.map(function(r){return '<tr data-drill="dept?dept='+esc(r.dept)+'&from='+esc(d.from)+'&to='+esc(d.to)+'" style="cursor:pointer"><td class="small"><b>'+esc(r.dept)+'</b> '+esc(r.name||"")+'</td>'
+      +'<td class="num">'+Rr0(r.sales)+'</td><td class="num">'+(r.sharePct!=null?r.sharePct+"%":"\\u2014")+'</td><td class="num">'+gcell(r.growthPct)+'</td>'
+      +'<td class="num">'+(r.gpPct!=null?r.gpPct+"%":"\\u2014")+'</td><td class="num">'+Rr0(r.gpR)+'</td><td class="num">'+(r.gpSharePct!=null?r.gpSharePct+"%":"\\u2014")+'</td>'
+      +'<td class="num">'+pcell(r.wastePct,r.overWaste)+'</td><td class="num">'+pcell(r.shrinkPct,r.overShrink)+'</td>'
+      +'<td class="num">'+Rr0(r.grPurchases)+'</td><td class="num'+(r.overPurch?" neg":"")+'">'+(r.purchToSales!=null?r.purchToSales:"\\u2014")+'</td>'
+      +'<td class="num">'+Rr0(r.swell)+'</td><td class="num">'+(r.swellPctOfPurch!=null?r.swellPctOfPurch+"%":"\\u2014")+'</td>'
+      +'<td class="num">'+gcell(r.budgetVarPct)+'</td><td class="num '+(r.gpVarVsLy<0?"neg":"pos")+'">'+Rr0(r.gpVarVsLy)+'</td></tr>'}).join("")
+    +'</tbody></table></div><div class="legend">P:S = purchases-to-sales ratio (red > '+thr.purchToSales+'). Waste/Shrink red past '+thr.waste+'%. GP\\u0394LY = GP contribution change vs last year.</div></div>';
+  el.innerHTML=head+tbl;
+}
+
+// ---- Department dossier (#dept): /api/dept-dossier ----
+PAGES.dept=function(){var rp=routeParams();if(!rp.dept){setHTML('<div class="card"><div class="muted">Open a department from the League table or Brief.</div></div>');return}
+  loading();api("/api/dept-dossier?dept="+encodeURIComponent(rp.dept)+"&from="+encodeURIComponent(rp.from||"")+"&to="+encodeURIComponent(rp.to||"")).then(function(d){
+    var s=d.summary;
+    var h='<div class="card"><div class="brief-hd"><h1 style="margin:0;font-size:20px">'+esc(d.dept)+' '+esc(d.name||"")+(d.isFreshB?' <span class="tag">Fresh B</span>':'')+'</h1><div class="small muted">'+esc(d.from)+' \\u2192 '+esc(d.to)+'</div></div>'
+      +'<div class="cards kpis" style="margin-top:8px">'+kpi("Sales",Rr0(s.sales),null)+kpi("GP",Rr0(s.gpR),(s.gpPct!=null?s.gpPct+"%":""))+kpi("Waste",Rr0(s.waste),(s.wastePct!=null?s.wastePct+"% of sales":""))+kpi("Shrink",Rr0(s.shrink),(s.shrinkPct!=null?s.shrinkPct+"% of sales":""))+'</div></div>';
+    // GP bridge waterfall
+    var b=d.bridge;
+    h+='<div class="card brief-sec"><h2>GP bridge <span class="muted small">budget \\u2192 actual GP'+(d.isFreshB?' \\u00b7 weekly-FIM margin (Fresh B)':'')+'</span></h2>'+svgWaterfall(b)
+      +'<div class="small muted" style="margin-top:4px">Components reconcile to the rand'+(b.assertionResidual===0?" (\\u2713 ties)":" (residual "+b.assertionResidual+")")+'.</div></div>';
+    // Funding / swell panel
+    h+='<div class="card brief-sec"><h2>Funding \\u00b7 swell by week <span class="muted small">expected = rate \\u00d7 purchases vs received</span></h2>'
+      +'<div class="tablewrap"><table><thead><tr><th>Week</th><th class="num">Rate</th><th class="num">Purchases</th><th class="num">Expected</th><th class="num">Received</th><th class="num">Gap</th></tr></thead><tbody>'
+      +(d.swell||[]).map(function(w){return '<tr data-drill="cash?week='+esc(w.week)+'&type=SWELL"><td class="small">'+esc(w.week)+'</td><td class="num">'+(w.rate!=null?w.rate+"%":"\\u2014")+'</td><td class="num">'+Rr0(w.purchases)+'</td><td class="num">'+(w.expected!=null?Rr0(w.expected):"\\u2014")+'</td><td class="num">'+Rr0(w.received)+'</td><td class="num '+(w.short?"neg":"")+'">'+(w.gap!=null?(w.short?"\\u26A0 ":"")+Rr0(w.gap):"\\u2014")+'</td></tr>'}).join("")
+      +'</tbody></table></div><div class="legend">Rows flagged \\u26A0 received &lt; 80% of expected. Click a week for its statement SWELL lines.</div></div>';
+    // Top articles
+    h+='<div class="card brief-sec"><h2>Top articles <span class="muted small">by GR value this period \\u00b7 click for Article Analysis</span></h2>'
+      +'<div class="tablewrap"><table><thead><tr><th>Article</th><th>Description</th><th class="num">GR value</th><th class="num">FIM sales</th><th class="num">FIM waste</th></tr></thead><tbody>'
+      +(d.topArticles||[]).map(function(a){return '<tr data-drill="articles?article='+esc(a.code)+'" style="cursor:pointer"><td class="small">'+esc(a.code)+'</td><td class="small">'+esc(a.desc||"")+'</td><td class="num">'+Rr0(a.grValue)+'</td><td class="num">'+(a.fimSales!=null?Rr0(a.fimSales):"\\u2014")+'</td><td class="num">'+(a.fimWaste!=null?Rr0(a.fimWaste):"\\u2014")+'</td></tr>'}).join("")
+      +'</tbody></table></div></div>';
+    // Anomalies
+    h+='<div class="card brief-sec"><h2>Anomalies <span class="muted small">this dept</span></h2>'+(d.anomalies&&d.anomalies.length?'<div class="tablewrap"><table><tbody>'+d.anomalies.map(function(a){return '<tr><td><span class="sev-'+a.severity+'">'+a.severity+'</span></td><td class="small">'+esc(a.type)+'</td><td class="small">'+esc(a.message)+'</td></tr>'}).join("")+'</tbody></table></div>':'<div class="small pos">No open anomalies for this department.</div>')+'</div>';
+    setHTML(h);
+  }).catch(errBox);
+};
+
+// ---- GP Bridge (#gpbridge): /api/gpbridge (store waterfall + dept table) ----
+var _gbFrom="",_gbTo="";
+PAGES.gpbridge=function(){
+  setHTML(periodPickerHTML("gbPer")+'<div id="gbBody"><div class="loading">Loading\\u2026</div></div>');
+  initPeriodPicker("gbPer",function(from,to){_gbFrom=from;_gbTo=to;api("/api/gpbridge?from="+from+"&to="+to).then(gbRender).catch(function(e){$("gbBody").innerHTML='<div class="err">'+esc(e.message)+'</div>'})},"week");
+};
+function gbRender(d){
+  var b=d.store;
+  var h='<div class="card"><h2>Store GP bridge <span class="muted small">'+esc(d.from)+' \\u2192 '+esc(d.to)+' \\u00b7 budget GP '+Rr0(b.budgetGp)+' \\u2192 actual GP '+Rr0(b.actualGp)+'</span></h2>'+svgWaterfall(b)
+    +'<div class="small muted" style="margin-top:4px">Volume + margin rate \\u2212 waste \\u2212 shrink + residual = GP variance. Components reconcile to the rand'+(b.assertionResidual===0?" (\\u2713 ties)":" (residual "+b.assertionResidual+")")+'.</div></div>';
+  h+='<div class="card" style="margin-top:12px"><h2>By department <span class="muted small">worst GP variance first \\u00b7 click a dept for its FIM detail</span></h2><div class="tablewrap"><table><thead><tr><th>Dept</th><th class="num">Budget GP</th><th class="num">Volume</th><th class="num">Rate</th><th class="num">Waste</th><th class="num">Shrink</th><th class="num">Residual</th><th class="num">Actual GP</th><th class="num">GP var</th></tr></thead><tbody>'
+    +(d.depts||[]).map(function(x){function cv(k){var c=x.components.filter(function(c){return c.key===k})[0];return c?Rr0(c.value):"\\u2014"}
+      return '<tr data-drill="dept?dept='+esc(x.dept)+'&from='+esc(d.from)+'&to='+esc(d.to)+'" style="cursor:pointer"><td class="small"><b>'+esc(x.dept)+'</b> '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.budgetGp)+'</td><td class="num">'+cv("volume")+'</td><td class="num">'+cv("rate")+'</td><td class="num neg">'+cv("waste")+'</td><td class="num neg">'+cv("shrink")+'</td><td class="num muted">'+cv("residual")+'</td><td class="num">'+Rr0(x.actualGp)+'</td><td class="num '+(x.gpVar<0?"neg":"pos")+'">'+Rr0(x.gpVar)+'</td></tr>'}).join("")
+    +'</tbody></table></div></div>';
+  setHTML(periodPickerHTML("gbPer")+h);initPeriodPicker("gbPer",function(from,to){_gbFrom=from;_gbTo=to;api("/api/gpbridge?from="+from+"&to="+to).then(gbRender).catch(errBox)},"week");
 }
 
 // ---- Weekly Operating Brief (#brief): /api/brief (Brief 7 §2) ----
@@ -2390,7 +2473,7 @@ function briefLoad(){
       +clikKpiB("Variance",Rr0(ts.varianceZar),(ts.varianceZar>=0?"over":"under")+" budget","trading")
       +clikKpiB("vs LY",vpct(ts.lyVarPct),"LY "+Rr0(ts.lySales),"trading")+'</div>';
     h+='<div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Dept</th><th class="num">Sales</th><th class="num">Budget</th><th class="num">Var</th><th class="num">Var%</th><th class="num">GP%</th><th class="num">vs LY</th></tr></thead><tbody>'
-      +(t.depts||[]).map(function(x){return '<tr data-drill="departments"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.gpPct!=null?x.gpPct+"%":"\\u2014")+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
+      +(t.depts||[]).map(function(x){return '<tr data-drill="dept?dept='+esc(x.dept)+'&from='+esc(w.weekStart)+'&to='+esc(w.weekEnd)+'" style="cursor:pointer"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.gpPct!=null?x.gpPct+"%":"\\u2014")+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
       +'</tbody></table></div></div>';
 
     // ===== GP BRIDGE (waterfall) =====
@@ -2409,7 +2492,7 @@ function briefLoad(){
       +clikKpiB("Shrink",Rr0(ls.shrink),(ls.shrinkPct!=null?ls.shrinkPct+"% of sales"+((ls.shrinkPct>l.threshold)?" \\u26A0":""):""),"waste")+'</div>';
     h+='<div class="small muted" style="margin-top:8px">Top 5 offender departments (waste %, 4-week trend):</div>';
     h+='<div class="tablewrap"><table><thead><tr><th>Dept</th><th class="num">Waste %</th><th>4-wk trend</th></tr></thead><tbody>'
-      +(l.topOffenders||[]).map(function(o){var tr=(o.trend||[]).map(function(v){return v==null?"\\u2014":v+"%"}).join(" \\u203A ");return '<tr data-drill="waste?dept='+esc(o.dept)+'&date='+esc(o.date)+'" style="cursor:pointer"><td class="small">'+esc(o.dept)+' '+esc(o.name||"")+'</td><td class="num '+((o.wastePct||0)>l.threshold?"neg":"")+'">'+(o.wastePct!=null?o.wastePct+"%":"\\u2014")+' '+briefArrow(o.arrow)+'</td><td class="small muted">'+tr+'</td></tr>'}).join("")
+      +(l.topOffenders||[]).map(function(o){var tr=(o.trend||[]).map(function(v){return v==null?"\\u2014":v+"%"}).join(" \\u203A ");return '<tr data-drill="dept?dept='+esc(o.dept)+'&from='+esc(w.weekStart)+'&to='+esc(w.weekEnd)+'" style="cursor:pointer"><td class="small">'+esc(o.dept)+' '+esc(o.name||"")+'</td><td class="num '+((o.wastePct||0)>l.threshold?"neg":"")+'">'+(o.wastePct!=null?o.wastePct+"%":"\\u2014")+' '+briefArrow(o.arrow)+'</td><td class="small muted">'+tr+'</td></tr>'}).join("")
       +'</tbody></table><div class="legend">Click a department to open Waste &amp; Shrinkage filtered to it. Trend oldest\\u203Anewest.</div></div></div>';
 
     // ===== 3. MONEY OUT =====
@@ -2706,8 +2789,10 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
     +f("vencor_terms_days","Vencor payment terms","days (14)")
     +f("pnp_terms_days","PnP Corporate payment terms","days after week-end (28)")
     +f("open_po_max_age_days","Auto-close open POs after","days (default 90 \\u2014 older open lines drop off Open/Committed)")
+    +'<div class="hbar" style="grid-template-columns:240px 1fr;align-items:start"><span class="lab">Department friendly names</span><textarea class="inp" id="set_dept_names" rows="4" style="width:100%;font-family:monospace;font-size:11px" placeholder=\\'{"G12":"Groceries","F09":"Butchery"}\\'>'+esc(s.dept_names||"")+'</textarea></div>'
+    +'<div class="small muted">JSON map of SAP dept code \\u2192 friendly name, used across the League, GP bridge &amp; dossier.</div>'
     +'<div style="margin-top:10px"><button class="btn" onclick="saveSettings()">Save settings</button> <span id="set_msg" class="small muted"></span></div></div>';
-  window._setKeys=["monthly_turnover_target","target_gp_pct","budget_growth_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days"];
+  window._setKeys=["monthly_turnover_target","target_gp_pct","budget_growth_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days","dept_names"];
   var gl='<div class="card" style="margin-top:14px"><h2>Department guideline margins</h2>'+makeTable([
     {key:"dept_code",label:"Dept"},{key:"dept_name",label:"Name"},{key:"dept_group",label:"Group"},
     {key:"guideline_margin_pct",label:"Guideline %",num:true,html:function(r){return '<input class="inp" style="width:80px;text-align:right" value="'+r.guideline_margin_pct+'" onchange="saveGuideline(\\''+r.dept_code+'\\',this.value)">'}},
