@@ -150,6 +150,12 @@ export const APP_HTML = /* html */ `<!doctype html>
   .anrow .anty{font-weight:600;font-size:12.5px;word-break:break-word;margin-top:1px}
   .anrow .anmsg{word-break:break-word}
   /* dashboard redesign: section headers, period-picker pills, clickable tiles, margin bars */
+  .stalestrip{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:#f3f6f9;border:1px solid var(--line);border-radius:8px;padding:7px 12px;margin-bottom:10px;font-size:12px;cursor:pointer}
+  .stalestrip:empty{display:none}
+  .stale-lead{font-weight:700;color:var(--header)}
+  .stale-item{color:var(--muted)}.stale-item b{color:var(--header);font-weight:600}
+  .stale-warn{color:var(--red)}.stale-warn b{color:var(--red)}
+  .stale-sep{color:var(--line)}
   .dash-sec{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--header);font-weight:800;margin:20px 0 9px;border-bottom:1px solid var(--line);padding-bottom:5px}
   .dash-sec .ws{float:right;font-weight:600;color:var(--muted);text-transform:none;letter-spacing:0;font-size:11px}
   .dashpicker{flex-wrap:wrap;gap:6px;align-items:center}
@@ -296,6 +302,7 @@ var NAV=[
  ["gr","\\uD83D\\uDE9A","Goods Receipts"],
  ["cash","\\uD83D\\uDCB0","Cash & Creditors"],
  ["settlement","\\uD83D\\uDCB8","Settlement"],
+ ["coverage","\\uD83D\\uDFE2","Data Coverage"],
  ["settings","\\u2699","Settings"],
  ["export","\\uD83D\\uDCE4","Export Reports"]
 ];
@@ -306,7 +313,7 @@ var NAV_GROUPS=[
  {id:"g-overview",label:"Overview",items:["dashboard","trading","weekly","monthly","fy","customers","fanscore"]},
  {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","open","returns","gr","vendors","cash","settlement"]},
  {id:"g-analysis",label:"Analysis",items:["articles","categories","departments","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
- {id:"g-admin",label:"Admin",items:["upload","settings","export"]}
+ {id:"g-admin",label:"Admin",items:["upload","coverage","settings","export"]}
 ];
 
 // Integrated Margin Analysis: 6 expandable groups, each with FIM-column items.
@@ -892,6 +899,21 @@ function dashLoadDivPerf(from,to){
       }).join("")+'</div>';
   }).catch(function(){var el=$("divperf");if(el)el.innerHTML='<div class="muted small">Division performance unavailable.</div>'});
 }
+// Data-completeness staleness strip (Brief 7): latest-loaded per feed + missing weeks.
+function dashLoadStale(){
+  var el=$("dashStale");if(!el)return;
+  api("/api/feed-coverage?weeks=12").then(function(d){
+    var lt=d.latest||{},mb=d.missingByFeed||{};
+    function chip(lab,val,warn){return '<span class="stale-item'+(warn?" stale-warn":"")+'"><b>'+esc(lab)+'</b> '+esc(val)+'</span>'}
+    var parts=[chip("FIM to",lt.fim||"\\u2014",false),chip("Statement",lt.statement||"\\u2014",false),chip("EOD to",lt.eod||"\\u2014",false),chip("GR to",lt.gr||"\\u2014",false),chip("Fan Score",lt.fanScore||"\\u2014",false)];
+    // Missing/partial recent closed weeks per feed → warnings.
+    var warns=[];
+    [["EOD","eod"],["Statement","statement"],["GR","gr"],["Fan Score","fanScore"],["FIM","fim"]].forEach(function(p){
+      var wks=mb[p[1]]||[];if(wks.length)warns.push(chip(p[0]+" missing",wks.slice(-3).join(", ")+(wks.length>3?" +"+(wks.length-3):""),true));
+    });
+    el.innerHTML='<span class="stale-lead">\\uD83D\\uDFE2 Data as at</span> '+parts.join(" ")+(warns.length?' <span class="stale-sep">\\u2502</span> '+warns.join(" "):' <span class="pos small">\\u00b7 all recent weeks complete</span>');
+  }).catch(function(){var el=$("dashStale");if(el)el.innerHTML=""});
+}
 // PnP Account tile: current balance + next payment due + overdue badge (Brief 6).
 function dashLoadPnpAcct(){
   var el=$("pnpAcctBody");if(!el)return;
@@ -939,6 +961,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   var saved=dashSavedPeriod();
   var pills=DASH_PERIODS.map(function(o){return '<button class="pbtn'+(o[0]===saved?" on":"")+'" data-p="'+o[0]+'" onclick="dashSetPeriod(\\''+o[0]+'\\')">'+esc(o[1])+(o[0]==="custom"?" \\u25BE":"")+'</button>'}).join("");
   var h='<div id="dashRisk"></div>';
+  h+='<div id="dashStale" class="stalestrip clik" onclick="location.hash=\\'#coverage\\'" title="Open Data Coverage"></div>';
   h+='<div class="toolbar dashpicker">'+pills
     +'<span id="dashCustom"'+(saved==="custom"?"":" hidden")+'><input type="date" class="inp" id="dashFrom"> <input type="date" class="inp" id="dashTo"> <button class="btn" id="dashApply">Apply</button></span>'
     +'<span id="dashRange" class="tag"></span></div>';
@@ -1005,7 +1028,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   DASH_DIV_LOADED=false;
   dashLoadTiles();
   dashRiskBanner();
-  dashLoadCashflow();dashLoadPnpAcct();
+  dashLoadCashflow();dashLoadPnpAcct();dashLoadStale();
   // Customer-count widget (calendar yesterday / week-to-date / month-to-date).
   api("/api/customer-counts/summary").then(function(cc){
     function ccDate(s){var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var p=String(s||"").split("-");return p.length===3?(+p[2])+" "+M[(+p[1])-1]+" "+p[0]:(s||"")}
@@ -2235,6 +2258,29 @@ function openSettlementLiv(liv){openModal("LIV "+esc(liv),'<div class="loading">
     openModal("LIV "+esc(liv)+(l.supplier_name?' <span class="tag">'+esc(l.supplier_name)+'</span>':''),head+gr+st);
   }).catch(function(e){openModal("LIV "+esc(liv),'<div class="err">'+esc(e&&e.message||e)+'</div>')});
 }
+
+// ---- Data Coverage grid (#coverage): /api/feed-coverage (Brief 7 §1) ----
+function covDot(cell){var c=cell.status==="green"?"#2E7D32":cell.status==="amber"?"#d97706":"#BE1D37";return '<span title="'+esc(cell.detail)+'" style="display:inline-block;width:22px;height:22px;border-radius:5px;background:'+c+';color:#fff;font-size:9px;line-height:22px;text-align:center;cursor:default">'+(cell.status==="green"?"":cell.status==="amber"?"~":"\\u2717")+'</span>'}
+PAGES.coverage=function(){loading();api("/api/feed-coverage?weeks=16").then(function(d){
+  var feeds=d.feeds||[],weeks=d.weeks||[];
+  // Latest-loaded staleness summary line at the top.
+  var lt=d.latest||{};
+  var stale='<div class="card"><h2>Feed status <span class="muted small">latest loaded</span></h2><div class="cards kpis">'
+    +kpi("PO export",esc(lt.po||"\\u2014"),null)+kpi("GR (BI)",esc(lt.gr||"\\u2014"),null)+kpi("EOD",esc(lt.eod||"\\u2014"),null)
+    +kpi("FIM",esc(lt.fim||"\\u2014"),null)+kpi("Statement",esc(lt.statement||"\\u2014"),null)+kpi("Customer count",esc(lt.cc||"\\u2014"),null)+kpi("Fan Score",esc(lt.fanScore||"\\u2014"),null)+'</div></div>';
+  // Grid: weeks (rows, newest first) x feeds (cols).
+  var head='<tr><th>Week</th><th>Range</th>'+feeds.map(function(f){return '<th style="text-align:center">'+esc(f.label)+'</th>'}).join("")+'<th></th></tr>';
+  var body=weeks.slice().reverse().map(function(w){
+    var cur=w.code===d.currentWeek;
+    return '<tr'+(cur?' style="opacity:.6"':'')+'><td class="small"><b>'+esc(w.code)+'</b>'+(cur?' <span class="muted">(current)</span>':'')+'</td><td class="small muted">'+esc(ddmm(w.weekStart))+'\\u2013'+esc(ddmm(w.weekEnd))+'</td>'
+      +feeds.map(function(f){return '<td style="text-align:center">'+covDot(w.cells[f.key])+'</td>'}).join("")
+      +'<td>'+(w.complete?'<span class="pos small">complete</span>':'<span class="muted small">partial</span>')+'</td></tr>';
+  }).join("");
+  var grid='<div class="card" style="margin-top:14px"><h2>Weekly feed coverage <span class="muted small">green complete \\u00b7 amber partial \\u00b7 red missing</span></h2>'
+    +'<div class="tablewrap"><table>'+head+body+'</table></div>'
+    +'<div class="legend">Hover a cell for detail (e.g. days present). The current fiscal week is dimmed \\u2014 its feeds are still arriving.</div></div>';
+  setHTML(stale+grid);
+}).catch(errBox)};
 
 var _grFT={from:"",to:""},_grTab="gr";
 PAGES.gr=function(){
