@@ -352,3 +352,22 @@ components equal the Loss section's values. **Money back** on the Brief shows bo
 
 `budget_growth_pct` and `target_gp_pct` (Settings) are the single source of the
 growth/margin assumptions used by OTB, the GP bridge and budget generation.
+
+## Department deep-dive + league (Brief 9)
+
+**Dept league** (`/api/dept-league?from=&to=`, `src/dept.ts`, screen `#deptleague`):
+one row per SAP department for a period — sales + store-share + LY growth, GP% /
+GP R / GP-contribution share, waste% / shrink% (red past 2%), GR purchases +
+purchases-to-sales ratio (red > 1.05), swell funding + % of purchases, budget
+variance. Sortable on any column (default worst GP-vs-LY first), with a movers
+strip (3 growth gainers / 3 decliners / 3 margin drops vs LY). Each row opens the
+**dossier** (`#dept`): summary, GP-bridge waterfall, swell-by-week (expected =
+rate × purchases vs received, gaps flagged), top-10 articles by GR value (→ Article
+Analysis), and the department's anomalies. `#gpbridge` shows the store waterfall +
+a per-department component table (worst variance first → dossier).
+
+The **GP bridge** is a shared 5-component decomposition — Budget GP → volume →
+margin rate → −waste → −shrink → residual → Actual GP — with the residual absorbing
+rounding so the components reconcile to the rand (the endpoint asserts and returns
+the check). The Brief's Trading/Loss and OTB dept rows all drill into the dossier.
+Friendly department names live in `app_settings.dept_names` (editable in Settings).
