@@ -54,7 +54,7 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   const ly = await env.DB.prepare(`SELECT fiscal_week_code, week_start, week_end FROM fiscal_weeks WHERE fiscal_year=? AND week_no=?`).bind(target.fiscal_year - 1, target.week_no).first<{ fiscal_week_code: string; week_start: string; week_end: string }>();
 
   // Fetch the independent pieces concurrently.
-  const [coverage, fim, lyFim, budgetRows, payments, vencorRes, claimsRow, uninvRow, returnsRow, fanRow, interestRow, anomRow, trendRes] = await Promise.all([
+  const [coverage, fim, lyFim, budgetRows, payments, vencorRes, claimsRow, uninvRow, returnsRow, fanRow, interestRow, anomRow, posRow, trendRes] = await Promise.all([
     weekCoverage(env, code, ws, we),
     fimByDept(env, ws, we),
     ly ? fimByDept(env, ly.week_start, ly.week_end) : Promise.resolve([]),
@@ -80,6 +80,8 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
     env.DB.prepare(`SELECT nps_tw, nps_computed FROM fan_score_weeks WHERE week_ending BETWEEN ? AND ?`).bind(ws, we).first<{ nps_tw: number | null; nps_computed: number | null }>(),
     env.DB.prepare(`SELECT COALESCE(SUM(l.amount),0) amt, COUNT(*) n FROM statement_lines l JOIN statements s ON s.statement_no=l.statement_no WHERE lower(l.vendor_text) LIKE '%interest%' AND s.cut_off BETWEEN ? AND ?`).bind(ws, we).first<{ amt: number; n: number }>(),
     env.DB.prepare(`SELECT COUNT(*) n FROM anomalies WHERE resolved=0`).first<{ n: number }>(),
+    // POs placed this week (net S001-S002, cents) — for the dashboard "this week so far".
+    env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN COALESCE(sloc,'')='S002' THEN -COALESCE(line_value_cents,0) ELSE COALESCE(line_value_cents,0) END),0) v FROM po_lines WHERE order_date BETWEEN ? AND ?`).bind(ws, we).first<{ v: number }>(),
     // 4-week waste% trend per dept (weeks ending at the selected week).
     env.DB.prepare(
       `WITH RECURSIVE _days(d) AS (SELECT date(?2,'-21 days') UNION ALL SELECT date(d,'+1 day') FROM _days WHERE d < ?2),
@@ -145,8 +147,15 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   // ---- Watch ----
   const fanNps = fanRow ? (fanRow.nps_tw ?? fanRow.nps_computed) : null;
 
+  // Days of the week elapsed as of today (capped 0..7) for pro-rata "this week so far".
+  const todayStr = (await env.DB.prepare(`SELECT date('now') d`).first<{ d: string }>())?.d ?? we;
+  const asOf = todayStr < we ? todayStr : we;
+  const daysElapsed = Math.max(0, Math.min(7, Math.round((Date.parse(asOf) - Date.parse(ws)) / 86400000) + 1));
+  const posPlacedZar = Math.round((posRow?.v ?? 0) / 100);
+
   return json({
-    week: { code, weekStart: ws, weekEnd: we, weekNo: target.week_no, fiscalYear: target.fiscal_year, lyCode: ly?.fiscal_week_code ?? null },
+    week: { code, weekStart: ws, weekEnd: we, weekNo: target.week_no, fiscalYear: target.fiscal_year, lyCode: ly?.fiscal_week_code ?? null, daysElapsed },
+    posPlacedZar,
     params: { growthPct, requiredMarginPct },
     coverage,
     trading: {

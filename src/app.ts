@@ -150,6 +150,16 @@ export const APP_HTML = /* html */ `<!doctype html>
   .anrow .anty{font-weight:600;font-size:12.5px;word-break:break-word;margin-top:1px}
   .anrow .anmsg{word-break:break-word}
   /* dashboard redesign: section headers, period-picker pills, clickable tiles, margin bars */
+  .brief-sec{margin-top:16px}.brief-sec h2{border-bottom:2px solid var(--nav);padding-bottom:4px}
+  .brief-warn{background:#fdf6ec;border-left:4px solid var(--amber);border-radius:6px;padding:8px 12px;margin:8px 0;font-size:12px;color:#8a5a00}
+  .brief-hd{display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:8px}
+  .arrow-up{color:var(--red)}.arrow-down{color:var(--green)}.arrow-flat{color:var(--muted)}
+  @media print{
+    #nav,#botnav,.topbar,.subbar,.toolbar,.noprint{display:none !important}
+    #main,#content{margin:0 !important;padding:0 !important;width:100% !important}
+    .card{break-inside:avoid;box-shadow:none;border:1px solid #ccc}
+    body{background:#fff}
+  }
   .stalestrip{display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:#f3f6f9;border:1px solid var(--line);border-radius:8px;padding:7px 12px;margin-bottom:10px;font-size:12px;cursor:pointer}
   .stalestrip:empty{display:none}
   .stale-lead{font-weight:700;color:var(--header)}
@@ -301,6 +311,7 @@ var NAV=[
  ["anomalies","\\u26A0","Risk & Anomalies"],
  ["gr","\\uD83D\\uDE9A","Goods Receipts"],
  ["cash","\\uD83D\\uDCB0","Cash & Creditors"],
+ ["brief","\\uD83D\\uDCCB","Weekly Brief"],
  ["settlement","\\uD83D\\uDCB8","Settlement"],
  ["coverage","\\uD83D\\uDFE2","Data Coverage"],
  ["settings","\\u2699","Settings"],
@@ -310,7 +321,7 @@ var NAV=[
 // Collapsible sidebar groups. Each lists NAV keys; render + toggle state persist
 // per-group in localStorage under "nav-<group id>" (default expanded).
 var NAV_GROUPS=[
- {id:"g-overview",label:"Overview",items:["dashboard","trading","weekly","monthly","fy","customers","fanscore"]},
+ {id:"g-overview",label:"Overview",items:["dashboard","brief","trading","weekly","monthly","fy","customers","fanscore"]},
  {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","open","returns","gr","vendors","cash","settlement"]},
  {id:"g-analysis",label:"Analysis",items:["articles","categories","departments","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
  {id:"g-admin",label:"Admin",items:["upload","coverage","settings","export"]}
@@ -899,6 +910,26 @@ function dashLoadDivPerf(from,to){
       }).join("")+'</div>';
   }).catch(function(){var el=$("divperf");if(el)el.innerHTML='<div class="muted small">Division performance unavailable.</div>'});
 }
+// "This week so far" (Brief 7 §3): current fiscal week sales-to-date vs pro-rata
+// budget + POs placed, with a Last week's Brief link. Uses the coverage currentWeek.
+function dashLoadThisWeek(){
+  var el=$("dashTWbody");if(!el)return;
+  api("/api/feed-coverage?weeks=2").then(function(cov){
+    var cur=cov.currentWeek;
+    return api("/api/brief?week="+encodeURIComponent(cur)).then(function(d){
+      var ts=d.trading.store,de=d.week.daysElapsed||0;
+      var fimOk=(d.coverage&&d.coverage.fim&&d.coverage.fim.status)!=="red";
+      var budgetToDate=Math.round((ts.budget||0)*de/7);
+      var salesVar=(fimOk&&budgetToDate>0)?Math.round((ts.sales-budgetToDate)/budgetToDate*1000)/10:null;
+      var lk=$("dashTWlink");if(lk)lk.textContent=d.week.code+" \\u00b7 day "+de+"/7";
+      el.innerHTML='<div class="cards kpis">'
+        +kpi("Sales to date",fimOk?Rr0(ts.sales):'<span class="muted">awaiting FIM</span>',(salesVar!=null?(salesVar>=0?"+":"")+salesVar+"% vs pro-rata budget":(fimOk?"":"data not loaded yet")))
+        +kpi("Budget to date",Rr0(budgetToDate),"of "+Rr0(ts.budget)+" ("+de+"/7 days)")
+        +kpi("POs placed",Rr0(d.posPlacedZar||0),"this week")
+        +'</div><div class="small" style="margin-top:6px"><a class="link" href="#brief">\\uD83D\\uDCCB Open the Weekly Operating Brief \\u2192</a></div>';
+    });
+  }).catch(function(){var el=$("dashTWbody");if(el)el.innerHTML='<div class="muted small">This-week data unavailable.</div>'});
+}
 // Data-completeness staleness strip (Brief 7): latest-loaded per feed + missing weeks.
 function dashLoadStale(){
   var el=$("dashStale");if(!el)return;
@@ -962,6 +993,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   var pills=DASH_PERIODS.map(function(o){return '<button class="pbtn'+(o[0]===saved?" on":"")+'" data-p="'+o[0]+'" onclick="dashSetPeriod(\\''+o[0]+'\\')">'+esc(o[1])+(o[0]==="custom"?" \\u25BE":"")+'</button>'}).join("");
   var h='<div id="dashRisk"></div>';
   h+='<div id="dashStale" class="stalestrip clik" onclick="location.hash=\\'#coverage\\'" title="Open Data Coverage"></div>';
+  h+='<div id="dashThisWeek" class="card clik" onclick="location.hash=\\'#brief\\'" title="Open Weekly Operating Brief" style="margin-bottom:10px"><h2>This week so far <span id="dashTWlink" class="muted small" style="text-transform:none;letter-spacing:0"></span></h2><div id="dashTWbody"><div class="muted small">Loading\\u2026</div></div></div>';
   h+='<div class="toolbar dashpicker">'+pills
     +'<span id="dashCustom"'+(saved==="custom"?"":" hidden")+'><input type="date" class="inp" id="dashFrom"> <input type="date" class="inp" id="dashTo"> <button class="btn" id="dashApply">Apply</button></span>'
     +'<span id="dashRange" class="tag"></span></div>';
@@ -1028,7 +1060,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   DASH_DIV_LOADED=false;
   dashLoadTiles();
   dashRiskBanner();
-  dashLoadCashflow();dashLoadPnpAcct();dashLoadStale();
+  dashLoadCashflow();dashLoadPnpAcct();dashLoadStale();dashLoadThisWeek();
   // Customer-count widget (calendar yesterday / week-to-date / month-to-date).
   api("/api/customer-counts/summary").then(function(cc){
     function ccDate(s){var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var p=String(s||"").split("-");return p.length===3?(+p[2])+" "+M[(+p[1])-1]+" "+p[0]:(s||"")}
@@ -2281,6 +2313,91 @@ PAGES.coverage=function(){loading();api("/api/feed-coverage?weeks=16").then(func
     +'<div class="legend">Hover a cell for detail (e.g. days present). The current fiscal week is dimmed \\u2014 its feeds are still arriving.</div></div>';
   setHTML(stale+grid);
 }).catch(errBox)};
+
+// ---- Weekly Operating Brief (#brief): /api/brief (Brief 7 §2) ----
+function briefArrow(a){return a==="up"?'<span class="arrow-up">\\u25B2</span>':a==="down"?'<span class="arrow-down">\\u25BC</span>':'<span class="arrow-flat">\\u2192</span>'}
+function briefWarn(txt){return '<div class="brief-warn">\\u26A0 '+esc(txt)+'</div>'}
+function vpct(v){return v==null?"\\u2014":(v>=0?"+":"")+v+"%"}
+PAGES.brief=function(){var rp=routeParams();window._briefWeek=rp.week||"";window._briefMargin=rp.margin||"";loading();briefLoad();};
+function briefLoad(){
+  var qs=[];if(window._briefWeek)qs.push("week="+encodeURIComponent(window._briefWeek));if(window._briefMargin)qs.push("marginPct="+encodeURIComponent(window._briefMargin));
+  Promise.all([api("/api/brief"+(qs.length?"?"+qs.join("&"):"")),loadPeriods()]).then(function(res){
+    var d=res[0],per=res[1];var w=d.week,cov=d.coverage||{};window._briefWeek=w.code;
+    var weeks=(per.weeks||[]);
+    var sel='<select class="sel" id="brWeek" onchange="window._briefWeek=this.value;briefLoad()">'+weeks.map(function(x){var c=x.label.split(" ")[0];return '<option value="'+esc(c)+'"'+(c===w.code?" selected":"")+'>'+esc(x.label)+'</option>'}).join("")+'</select>';
+    // Coverage chips for the week.
+    var feeds=[["po","PO"],["gr","GR"],["eod","EOD"],["fim","FIM"],["statement","Stmt"],["cc","Cust"],["fanScore","Fan"]];
+    var chips=feeds.map(function(f){var c=cov[f[0]]||{};var col=c.status==="green"?"var(--green)":c.status==="amber"?"var(--amber)":"var(--red)";return '<span class="tag" style="border-color:'+col+';color:'+col+'" title="'+esc(c.detail||"")+'">'+f[1]+'</span>'}).join(" ");
+    var h='<div class="toolbar noprint" style="gap:10px;flex-wrap:wrap"><label class="small muted">Week '+sel+'</label>'
+      +'<label class="small muted">Required margin % <input class="inp" id="brMargin" type="number" step="0.1" value="'+(d.params.requiredMarginPct)+'" style="width:80px" onchange="window._briefMargin=this.value;briefLoad()"></label>'
+      +'<button class="btn" onclick="window.print()">\\uD83D\\uDDA8 Print</button></div>';
+    h+='<div class="card"><div class="brief-hd"><h1 style="margin:0;font-size:20px">Weekly Operating Brief</h1><div class="small muted">'+esc(w.code)+' \\u00b7 '+esc(w.weekStart)+' \\u2192 '+esc(w.weekEnd)+(w.lyCode?' \\u00b7 LY '+esc(w.lyCode):'')+'</div></div><div style="margin-top:6px">'+chips+'</div></div>';
+
+    // ===== 1. TRADING =====
+    var t=d.trading,ts=t.store;
+    h+='<div class="card brief-sec"><h2>1 \\u00b7 Trading <span class="muted small">sales vs budget \\u00b7 '+esc(t.budgetSource)+'</span></h2>';
+    if(!t.complete)h+=briefWarn("FIM incomplete for this week ("+(cov.fim&&cov.fim.detail||"")+") \\u2014 sales figures are partial.");
+    h+='<div class="cards kpis">'
+      +clikKpiB("Store sales",Rr0(ts.sales),vpct(ts.variancePct)+" vs budget "+Rr0(ts.budget),"trading")
+      +clikKpiB("GP %",(ts.gpPct!=null?ts.gpPct+"%":"\\u2014"),(ts.gpDeltaPp!=null?(ts.gpDeltaPp>=0?"+":"")+ts.gpDeltaPp+"pp vs "+ts.requiredMarginPct+"% req":""),"ima")
+      +clikKpiB("Variance",Rr0(ts.varianceZar),(ts.varianceZar>=0?"over":"under")+" budget","trading")
+      +clikKpiB("vs LY",vpct(ts.lyVarPct),"LY "+Rr0(ts.lySales),"trading")+'</div>';
+    h+='<div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Dept</th><th class="num">Sales</th><th class="num">Budget</th><th class="num">Var</th><th class="num">Var%</th><th class="num">GP%</th><th class="num">vs LY</th></tr></thead><tbody>'
+      +(t.depts||[]).map(function(x){return '<tr data-drill="departments"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.gpPct!=null?x.gpPct+"%":"\\u2014")+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
+      +'</tbody></table></div></div>';
+
+    // ===== 2. LOSS =====
+    var l=d.loss,ls=l.store;
+    h+='<div class="card brief-sec"><h2>2 \\u00b7 Loss <span class="muted small">waste &amp; shrink vs '+l.threshold+'% of sales</span></h2>';
+    if(!l.complete)h+=briefWarn("FIM incomplete \\u2014 waste/shrink are partial.");
+    h+='<div class="cards kpis">'
+      +clikKpiB("Waste",Rr0(ls.waste),(ls.wastePct!=null?ls.wastePct+"% of sales"+((ls.wastePct>l.threshold)?" \\u26A0":""):""),"waste")
+      +clikKpiB("Shrink",Rr0(ls.shrink),(ls.shrinkPct!=null?ls.shrinkPct+"% of sales"+((ls.shrinkPct>l.threshold)?" \\u26A0":""):""),"waste")+'</div>';
+    h+='<div class="small muted" style="margin-top:8px">Top 5 offender departments (waste %, 4-week trend):</div>';
+    h+='<div class="tablewrap"><table><thead><tr><th>Dept</th><th class="num">Waste %</th><th>4-wk trend</th></tr></thead><tbody>'
+      +(l.topOffenders||[]).map(function(o){var tr=(o.trend||[]).map(function(v){return v==null?"\\u2014":v+"%"}).join(" \\u203A ");return '<tr data-drill="waste?dept='+esc(o.dept)+'&date='+esc(o.date)+'" style="cursor:pointer"><td class="small">'+esc(o.dept)+' '+esc(o.name||"")+'</td><td class="num '+((o.wastePct||0)>l.threshold?"neg":"")+'">'+(o.wastePct!=null?o.wastePct+"%":"\\u2014")+' '+briefArrow(o.arrow)+'</td><td class="small muted">'+tr+'</td></tr>'}).join("")
+      +'</tbody></table><div class="legend">Click a department to open Waste &amp; Shrinkage filtered to it. Trend oldest\\u203Anewest.</div></div></div>';
+
+    // ===== 3. MONEY OUT =====
+    var mo=d.moneyOut;
+    h+='<div class="card brief-sec"><h2>3 \\u00b7 Money out <span class="muted small">due next 14 days</span></h2>';
+    h+='<div class="cards g2"><div><div class="small muted" style="font-weight:700">PnP statement obligations</div>'
+      +((mo.pnp||[]).length?'<table><tbody>'+mo.pnp.map(function(p){return '<tr data-drill="cash"><td class="small">'+esc(p.code)+'</td><td class="small">'+esc(p.dueDate)+'</td><td class="num '+(p.status==="OVERDUE"?"neg":"")+'">'+Rr0(p.totalDue)+'</td><td class="small '+(p.status==="OVERDUE"?"neg":"muted")+'">'+esc(p.status)+'</td></tr>'}).join("")+'</tbody></table>':'<div class="muted small">None due in 14 days.</div>')
+      +'</div><div><div class="small muted" style="font-weight:700">Vencor / meat (14-day terms)</div>'
+      +((mo.vencor||[]).length?'<table><tbody>'+mo.vencor.slice(0,10).map(function(v){return '<tr data-drill="gr"><td class="small">GR '+esc(v.grDate)+'</td><td class="small">due '+esc(v.dueDate)+'</td><td class="num">'+Rr0(v.valueZar)+'</td></tr>'}).join("")+'</tbody></table>':'<div class="muted small">No meat GR due in 14 days.</div>')
+      +'</div></div>';
+    if((mo.overdue||[]).length)h+=briefWarn((mo.overdue.length)+" statement(s) overdue: "+mo.overdue.map(function(o){return o.code+" "+Rr0(o.totalDue)}).join(", "));
+    h+='</div>';
+
+    // ===== 4. MONEY BACK =====
+    var mb=d.moneyBack;
+    h+='<div class="card brief-sec"><h2>4 \\u00b7 Money back <span class="muted small">recovery opportunities</span></h2><div class="cards kpis">'
+      +clikKpiB("Confirmed claims",Rr0(mb.claims.total),mb.claims.count+" overbilled LIVs","settlement")
+      +clikKpiB("Uninvoiced GR &gt;14d",Rr0(mb.uninvoicedGr.total),mb.uninvoicedGr.count+" receipts","settlement")
+      +clikKpiB("Returns w/o credit",Rr0(mb.returnsNoCredit.total),mb.returnsNoCredit.count+" returns","settlement")+'</div>'
+      +'<div class="legend">Click through to Settlement to raise. Figures are store-wide across loaded EOD weeks.</div></div>';
+
+    // ===== 5. WATCH =====
+    var wt=d.watch;
+    h+='<div class="card brief-sec"><h2>5 \\u00b7 Watch</h2>';
+    // Fan Score
+    if(!wt.fanScore.present)h+=briefWarn("Fan Score not loaded for "+w.code+" \\u2014 cannot report NPS.");
+    else h+='<div class="mc-row" data-drill="fanscore" style="cursor:pointer"><span class="mc-l">Fan Score / NPS</span><span class="mc-v '+(wt.fanScore.belowTarget?"neg":"pos")+'">'+(wt.fanScore.nps!=null?wt.fanScore.nps+"%":"\\u2014")+' vs 90% target</span></div>';
+    // Interest
+    if(!wt.interest.present)h+=briefWarn("Statement not loaded for "+w.code+" \\u2014 interest cannot be confirmed.");
+    else h+='<div class="mc-row" data-drill="cash?q=interest" style="cursor:pointer"><span class="mc-l">Interest charged</span><span class="mc-v '+(wt.interest.amount>0?"neg":"pos")+'">'+(wt.interest.amount>0?Rr(wt.interest.amount)+" \\u26A0":"none")+'</span></div>';
+    h+='<div id="briefAnoms" style="margin-top:8px"><div class="muted small">Loading anomalies\\u2026</div></div></div>';
+
+    setHTML(h);
+    // Watch anomalies: scoped to the week, with drill-through (reuses anomTableHTML).
+    api("/api/anomalies/scoped?from="+w.weekStart+"&to="+w.weekEnd+"&resolved=false&limit=40").then(function(a){
+      var el=$("briefAnoms");if(!el)return;var list=a.anomalies||[];
+      el.innerHTML='<div class="small muted" style="font-weight:700;margin-bottom:4px">Open anomalies this week ('+list.length+')</div>'+anomTableHTML(list,false,"this week");
+    }).catch(function(){});
+  }).catch(errBox);
+}
+// KPI card variant that drills to a hash target (event-delegated via [data-drill]).
+function clikKpiB(label,value,sub,drill){return '<div class="card kpi" data-drill="'+esc(drill)+'" style="cursor:pointer"><div class="v">'+value+'</div><div class="l">'+esc(label)+'</div>'+(sub?'<div class="sub">'+sub+'</div>':'')+'</div>'}
 
 var _grFT={from:"",to:""},_grTab="gr";
 PAGES.gr=function(){
