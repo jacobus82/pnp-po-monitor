@@ -51,6 +51,32 @@ function fimStatus(fimd: number, fimw: number): { status: string; detail: string
 }
 
 /**
+ * Feed status for a SINGLE fiscal week (reused by the Weekly Operating Brief to
+ * mark sections built on incomplete data). Returns per-feed {status, detail}.
+ */
+export async function weekCoverage(
+  env: Env, weekCode: string, weekStart: string, weekEnd: string,
+): Promise<Record<string, { status: string; detail: string }>> {
+  const r = await env.DB.prepare(
+    `SELECT
+       (SELECT COUNT(DISTINCT order_date) FROM po_lines WHERE order_date BETWEEN ?2 AND ?3) po,
+       (SELECT COUNT(DISTINCT gr_date) FROM gr_lines WHERE gr_date BETWEEN ?2 AND ?3) gr,
+       (SELECT COUNT(DISTINCT mvmt_date) FROM eod_movements WHERE mvmt_date BETWEEN ?2 AND ?3) eod,
+       (SELECT COUNT(DISTINCT date_from) FROM fim_daily WHERE report_type='daily' AND date_from BETWEEN ?2 AND ?3) fimd,
+       (SELECT COUNT(*) FROM fim_daily WHERE report_type='weekly' AND date_from<=?3 AND date_to>=?2) fimw,
+       (SELECT COUNT(*) FROM statements WHERE statement_no=?1) stmt,
+       (SELECT COUNT(DISTINCT cal_date) FROM customer_counts WHERE cal_date BETWEEN ?2 AND ?3) cc,
+       (SELECT COUNT(*) FROM fan_score_weeks WHERE week_ending BETWEEN ?2 AND ?3) fs`,
+  ).bind(weekCode, weekStart, weekEnd).first<{ po: number; gr: number; eod: number; fimd: number; fimw: number; stmt: number; cc: number; fs: number }>();
+  const z = r ?? { po: 0, gr: 0, eod: 0, fimd: 0, fimw: 0, stmt: 0, cc: 0, fs: 0 };
+  return {
+    po: dailyStatus(z.po), gr: dailyStatus(z.gr), eod: dailyStatus(z.eod),
+    fim: fimStatus(z.fimd, z.fimw), statement: binaryStatus(z.stmt, weekCode),
+    cc: dailyStatus(z.cc), fanScore: binaryStatus(z.fs, "loaded"),
+  };
+}
+
+/**
  * GET /api/feed-coverage?weeks=N — per-fiscal-week feed presence for the last N
  * weeks up to the current week, plus latest-loaded markers and a staleness summary.
  */

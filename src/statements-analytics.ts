@@ -246,6 +246,46 @@ export async function handleStatementDashboard(env: Env): Promise<Response> {
 }
 
 /**
+ * Shared payments-due computation (same FIFO reconciliation as the statement
+ * dashboard) for reuse by the Weekly Operating Brief. Returns the next PnP
+ * obligation, the unpaid schedule, and overdue — all from `statements`.
+ */
+export async function computePaymentsDue(env: Env): Promise<{
+  next: { code: string; dueDate: string; totalDue: number } | null;
+  schedule: Array<{ code: string; dueDate: string; totalDue: number; status: string }>;
+  overdue: Array<{ code: string; dueDate: string; totalDue: number }>;
+  totalOverdue: number;
+  totalOutstanding: number;
+}> {
+  const today = (await env.DB.prepare(`SELECT date('now') d`).first<{ d: string }>())?.d ?? "";
+  const [hdrRes, payRes] = await Promise.all([
+    env.DB.prepare(`SELECT statement_no, cut_off, due_date, total_due FROM statements ORDER BY cut_off ASC, statement_no ASC`).all<{ statement_no: string; cut_off: string; due_date: string; total_due: number }>(),
+    env.DB.prepare(`SELECT ROUND(ABS(amount),2) mag FROM statement_lines WHERE line_type='PAYMENT'`).all<{ mag: number }>(),
+  ]);
+  const hdrs = hdrRes.results ?? [];
+  const totalPaid = (payRes.results ?? []).reduce((s, p) => s + p.mag, 0);
+  let cumDue = 0;
+  const schedule: Array<{ code: string; dueDate: string; totalDue: number; status: string }> = [];
+  const overdue: Array<{ code: string; dueDate: string; totalDue: number }> = [];
+  for (const h of hdrs) {
+    if (!(h.total_due > 0)) continue;
+    cumDue += h.total_due;
+    if (cumDue <= totalPaid + 1) continue; // settled by cumulative payments (FIFO)
+    if (h.due_date < today) overdue.push({ code: h.statement_no, dueDate: h.due_date, totalDue: r2(h.total_due) });
+    else schedule.push({ code: h.statement_no, dueDate: h.due_date, totalDue: r2(h.total_due), status: "UPCOMING" });
+  }
+  overdue.forEach((o) => schedule.push({ ...o, status: "OVERDUE" }));
+  schedule.sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const latest = hdrs[hdrs.length - 1];
+  const next = latest && latest.total_due > 0 ? { code: latest.statement_no, dueDate: latest.due_date, totalDue: r2(latest.total_due) } : null;
+  return {
+    next, schedule, overdue: overdue.sort((a, b) => a.dueDate.localeCompare(b.dueDate)),
+    totalOverdue: r2(overdue.reduce((s, o) => s + o.totalDue, 0)),
+    totalOutstanding: r2(schedule.reduce((s, o) => s + o.totalDue, 0)),
+  };
+}
+
+/**
  * GET /api/statements/lines?statement=&from=&to=&type=&vendor=&q=&sort=&dir=
  * Line-level browser: filter by statement / cut-off range / line_type / vendor /
  * free text, sortable, with per-type subtotals. The charts drill into this.
