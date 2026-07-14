@@ -7,6 +7,7 @@ import { handleStatementDashboard, handleStatementBrowse } from "./statements-an
 import { handleFeedCoverage } from "./coverage";
 import { handleWeeklyBrief } from "./brief";
 import { handleOtb, recomputeOtbAnomalies } from "./otb";
+import { handleDeptLeague, handleDeptDossier, handleGpBridge } from "./dept";
 import { parseFimFile, aggregateCpToDept } from "./parser/fimParser";
 import { parseCustomerFile } from "./parser/customerParser";
 import { parseFanScoreFile } from "./parser/fanScoreParser";
@@ -2424,6 +2425,9 @@ export default {
       if (path === "/api/feed-coverage" && m === "GET") return await handleFeedCoverage(req, env);
       if (path === "/api/brief" && m === "GET") return await handleWeeklyBrief(req, env);
       if (path === "/api/otb" && m === "GET") return await handleOtb(req, env);
+      if (path === "/api/dept-league" && m === "GET") return await handleDeptLeague(req, env);
+      if (path === "/api/dept-dossier" && m === "GET") return await handleDeptDossier(req, env);
+      if (path === "/api/gpbridge" && m === "GET") return await handleGpBridge(req, env);
       if (path === "/api/reconcile/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
         await recomputeReceipts(env);
