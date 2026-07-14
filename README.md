@@ -308,3 +308,25 @@ curl "…/api/settlement/liv?liv=5149590384"   # drill: EOD GR rows + statement 
 
 A **PnP Account** dashboard tile shows current balance, next payment due, and an
 overdue badge, linking to this screen.
+
+## Weekly Operating Brief + data completeness (Brief 7)
+
+**Data coverage** (`/api/feed-coverage`, `src/coverage.ts`, screen `#coverage`):
+per fiscal week, presence of every feed (PO, GR, EOD, FIM daily+weekly, statement,
+customer count, Fan Score) as green/amber/red, plus latest-loaded markers and a
+dashboard **staleness strip**. `weekCoverage()` is reused to flag any Brief section
+built on incomplete data.
+
+**Weekly Operating Brief** (`/api/brief`, `src/brief.ts`, screen `#brief`,
+print-friendly): five sections for a fiscal week (default = last completed) —
+Trading (sales vs budget store+dept, GP% vs required margin, same-week-LY), Loss
+(waste/shrink vs 2% + top-5 offenders with 4-week trend), Money out (PnP payments
+due 14d + Vencor 14-day GR terms + overdue), Money back (confirmed claims /
+uninvoiced GR >14d / returns without credit), Watch (Fan Score vs 90, interest,
+week-scoped anomalies). Every figure drills to its source screen; a section whose
+feeds are incomplete shows an inline warning rather than a partial total. The
+dashboard adds a **"This week so far"** card (sales-to-date vs pro-rata budget,
+POs placed; "awaiting FIM" when the current week hasn't loaded).
+
+> `scripts/check-inline.cjs` syntax-checks the inline SPA `<script>` (which tsc
+> treats as an opaque string) — run it before deploying app.ts changes.
