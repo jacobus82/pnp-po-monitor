@@ -1769,26 +1769,36 @@ async function buildGrPanel(env: Env, guidelines: Awaited<ReturnType<typeof fetc
   ).first<{ id: number; filename: string; uploaded_at: string }>();
   if (!latest) return null;
 
-  // Margin sums use cost only where sell is present, so blended margin is
-  // apples-to-apples (some GR lines carry cost but no sell value).
-  const summary = await env.DB.prepare(
-    `SELECT COUNT(*) AS lines,
-            COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
-            COALESCE(SUM(sell_zar),0) AS sell
-     FROM gr_lines WHERE upload_id = ?`,
-  )
-    .bind(latest.id)
-    .first<{ lines: number; cost: number; sell: number }>();
-
-  const deptRows = await env.DB.prepare(
-    `SELECT dept_code, MAX(dept_name) AS dept_name, COUNT(*) AS lines,
-            COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
-            COALESCE(SUM(sell_zar),0) AS sell
-     FROM gr_lines WHERE upload_id = ?
-     GROUP BY dept_code ORDER BY sell DESC`,
-  )
-    .bind(latest.id)
-    .all<{ dept_code: string; dept_name: string; lines: number; cost: number; sell: number }>();
+  // These three reads are all keyed by latest.id and independent of each other, so
+  // run them concurrently (one round-trip instead of three). Margin sums use cost
+  // only where sell is present, so blended margin is apples-to-apples (some GR lines
+  // carry cost but no sell value).
+  const [summary, deptRows, marginAnomalies] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS lines,
+              COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
+              COALESCE(SUM(sell_zar),0) AS sell
+       FROM gr_lines WHERE upload_id = ?`,
+    )
+      .bind(latest.id)
+      .first<{ lines: number; cost: number; sell: number }>(),
+    env.DB.prepare(
+      `SELECT dept_code, MAX(dept_name) AS dept_name, COUNT(*) AS lines,
+              COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
+              COALESCE(SUM(sell_zar),0) AS sell
+       FROM gr_lines WHERE upload_id = ?
+       GROUP BY dept_code ORDER BY sell DESC`,
+    )
+      .bind(latest.id)
+      .all<{ dept_code: string; dept_name: string; lines: number; cost: number; sell: number }>(),
+    env.DB.prepare(
+      `SELECT type, severity, message, detail_json FROM anomalies
+       WHERE upload_id = ? AND type IN ('NEGATIVE_MARGIN','LOW_MARGIN')
+       ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
+    )
+      .bind(latest.id)
+      .all<{ type: string; severity: string; message: string; detail_json: string | null }>(),
+  ]);
 
   const blended = (cost: number, sell: number) => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
 
@@ -1807,14 +1817,6 @@ async function buildGrPanel(env: Env, guidelines: Awaited<ReturnType<typeof fetc
       deltaPp: margin != null && guide != null ? Math.round((margin - guide) * 100) / 100 : null,
     };
   });
-
-  const marginAnomalies = await env.DB.prepare(
-    `SELECT type, severity, message, detail_json FROM anomalies
-     WHERE upload_id = ? AND type IN ('NEGATIVE_MARGIN','LOW_MARGIN')
-     ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
-  )
-    .bind(latest.id)
-    .all<{ type: string; severity: string; message: string; detail_json: string | null }>();
 
   return {
     uploadId: latest.id,
@@ -1847,23 +1849,25 @@ async function buildGrYesterday(env: Env) {
   const date = latest?.d ?? null;
   if (!date) return null;
 
-  const summary = await env.DB.prepare(
-    `SELECT COUNT(*) AS lines,
-            COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
-            COALESCE(SUM(sell_zar),0) AS sell
-     FROM gr_lines WHERE gr_date = ?`,
-  )
-    .bind(date)
-    .first<{ lines: number; cost: number; sell: number }>();
-
-  const deptRows = await env.DB.prepare(
-    `SELECT dept_code, MAX(dept_name) AS dept_name,
-            COALESCE(SUM(sell_zar),0) AS sell
-     FROM gr_lines WHERE gr_date = ?
-     GROUP BY dept_code ORDER BY sell DESC LIMIT 3`,
-  )
-    .bind(date)
-    .all<{ dept_code: string; dept_name: string; sell: number }>();
+  // Both keyed by the same date and independent — run concurrently.
+  const [summary, deptRows] = await Promise.all([
+    env.DB.prepare(
+      `SELECT COUNT(*) AS lines,
+              COALESCE(SUM(CASE WHEN sell_zar IS NOT NULL THEN cost_zar END),0) AS cost,
+              COALESCE(SUM(sell_zar),0) AS sell
+       FROM gr_lines WHERE gr_date = ?`,
+    )
+      .bind(date)
+      .first<{ lines: number; cost: number; sell: number }>(),
+    env.DB.prepare(
+      `SELECT dept_code, MAX(dept_name) AS dept_name,
+              COALESCE(SUM(sell_zar),0) AS sell
+       FROM gr_lines WHERE gr_date = ?
+       GROUP BY dept_code ORDER BY sell DESC LIMIT 3`,
+    )
+      .bind(date)
+      .all<{ dept_code: string; dept_name: string; sell: number }>(),
+  ]);
 
   const blended = (cost: number, sell: number) => (sell > 0 ? Math.round(((sell - cost) / sell) * 1000) / 10 : null);
 
