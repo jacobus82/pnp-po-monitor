@@ -447,7 +447,15 @@ function Rr(r){return "R"+(r==null?0:r).toLocaleString("en-ZA",{minimumFractionD
 function pct(v){return v==null?"\\u2014":(Math.round(v*10)/10)+"%"}
 function dmy(iso){if(!iso)return "";var p=String(iso).slice(0,10).split("-");return p.length<3?esc(iso):p[2]+"."+p[1]+"."+p[0]}
 function num(n){return (n==null?0:n).toLocaleString("en-ZA")}
-function api(path){return fetch(path,{cache:"no-store"}).then(function(r){if(!r.ok)return r.json().then(function(j){throw new Error(j.error||("HTTP "+r.status))});return r.json()})}
+// Route epoch (bumped by go() on every navigation). api() stamps the epoch at the
+// moment a fetch starts; if the route has changed by the time the response lands,
+// the result is dropped by returning a promise that never settles, so a stale page's
+// .then(setHTML)/sub-widget writes never fire and can't clobber the new screen. This
+// is the guard against "navigated to #customers but a late #dashboard fetch overwrote
+// the view". Errors from superseded fetches are likewise swallowed (no error flash).
+var _epoch=0;
+var _NEVER=new Promise(function(){});
+function api(path){var ep=_epoch;return fetch(path,{cache:"no-store"}).then(function(r){if(ep!==_epoch)return _NEVER;if(!r.ok)return r.json().then(function(j){throw new Error(j.error||("HTTP "+r.status))});return r.json()}).then(function(j){return ep!==_epoch?_NEVER:j})}
 // Admin token for destructive routes (X-Admin-Token). Stored once in localStorage;
 // prompt if missing or when force=true (e.g. after a 401 rejection).
 function adminToken(force){var t="";try{t=localStorage.getItem("admin-token")||""}catch(e){}if(!t||force){t=window.prompt("Admin token (required for destructive actions):")||"";try{localStorage.setItem("admin-token",t)}catch(e){}}return t}
@@ -3024,7 +3032,7 @@ function renderNav(){
 function parseRoute(){var raw=(location.hash||"#dashboard").slice(1);var qi=raw.indexOf("?");var key=qi<0?raw:raw.slice(0,qi);var params={};if(qi>=0){raw.slice(qi+1).split("&").forEach(function(kv){if(!kv)return;var eq=kv.indexOf("=");var k=eq<0?kv:kv.slice(0,eq);var v=eq<0?"":kv.slice(eq+1);try{params[decodeURIComponent(k)]=decodeURIComponent(v)}catch(e){params[k]=v}})}return {key:key,params:params}}
 // Read (and consume) the route params a page was opened with.
 function routeParams(){var p=window._route||{};window._route={};return p}
-function go(){var pr=parseRoute();var hash=pr.key;window._route=pr.params;if(!PAGES[hash]){hash="dashboard"}
+function go(){_epoch++;var pr=parseRoute();var hash=pr.key;window._route=pr.params;if(!PAGES[hash]){hash="dashboard"}
   // Highlight the single IMA nav item when on the dashboard or any group screen.
   document.querySelectorAll("#nav a").forEach(function(a){var r=a.getAttribute("data-r");a.classList.toggle("active",r===hash||(r==="ima"&&!!IMA_GROUP[hash]))});
   // Ensure the active link's group is expanded so the highlight is visible.
@@ -3041,6 +3049,10 @@ window.addEventListener("hashchange",go);
 document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-drill]"):null;if(!row)return;var drill=row.getAttribute("data-drill");if(drill){ev.preventDefault();location.hash="#"+drill;}});
 // Settlement drill: a [data-liv] row opens the LIV detail modal (EOD GR rows + statement lines).
 document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-liv]"):null;if(!row)return;var liv=row.getAttribute("data-liv");if(liv)openSettlementLiv(liv);});
+// Clicking a link to the CURRENT route sets an identical hash, which fires no
+// hashchange — so the target screen would not re-render. Force a deterministic
+// re-render for that case (a different hash still routes normally via hashchange).
+document.addEventListener("click",function(ev){var t=ev.target;var a=(t&&t.closest)?t.closest('a[href^="#"]'):null;if(!a)return;var href=a.getAttribute("href");if(href&&href.slice(1)===(location.hash||"#dashboard").slice(1))go();});
 function tick(){var s="Pick n Pay Lydenburg \\u00b7 "+new Date().toLocaleString("en-ZA",{hour12:false});$("clock").textContent=s;var sb=$("subbar");if(sb)sb.textContent=s}
 tick();setInterval(tick,1000);
 // NOTE: the timed auto-refresh that re-ran the current PAGES[hash]() every 60–120s
