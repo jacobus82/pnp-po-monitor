@@ -1961,122 +1961,128 @@ async function buildMarginPerformance(
 /** GET /api/dashboard — one-call aggregate powering the HTML dashboard. */
 async function handleDashboard(env: Env): Promise<Response> {
   const t = thresholds(env);
-  // Aged-out open PO lines (older than open_po_max_age_days) are treated as
-  // auto-closed: excluded from Open/Committed tiles but never mutated.
-  const maxAge = await openPoMaxAgeDays(env);
+
+  // Phase 1 — config + guideline snapshot + every read that depends on neither,
+  // all in parallel. These 10 reads were previously sequential awaits and were the
+  // bulk of the ~3.5s latency (round-trip per query). Aged-out open PO lines (older
+  // than open_po_max_age_days, via notAged below) are treated as auto-closed —
+  // excluded from Open/Committed tiles but never mutated.
+  const [maxAge, guidelines, byStatus, aging, sevRows, staleRow, topAnomalies, recentUploads, budgetRows, grYesterday] =
+    await Promise.all([
+      openPoMaxAgeDays(env),
+      fetchCurrentGuidelines(env),
+      // line totals by status (raw breakdown; the Open tiles below apply the age cap)
+      env.DB.prepare(
+        `SELECT line_status, COUNT(*) AS n,
+                COALESCE(SUM(open_value_cents),0) AS open_value_cents,
+                COALESCE(SUM(line_value_cents),0) AS line_value_cents
+         FROM po_lines GROUP BY line_status`,
+      ).all<{ line_status: string; n: number; open_value_cents: number; line_value_cents: number }>(),
+      // Open-order aging buckets. The SAP PO export carries no delivery date, so
+      // aging is measured from COALESCE(last_gr_date, order_date) per the
+      // reconciliation rules; fully-received lines are excluded (they are complete).
+      env.DB.prepare(
+        `SELECT CASE
+            WHEN COALESCE(received_qty,0) <= 0 THEN
+              CASE
+                WHEN order_date IS NULL THEN 'no_date'
+                WHEN julianday('now') - julianday(order_date) <= 7  THEN 'new_order'
+                WHEN julianday('now') - julianday(order_date) <= 21 THEN 'awaiting'
+                WHEN julianday('now') - julianday(order_date) <= 34 THEN 'overdue'
+                WHEN julianday('now') - julianday(order_date) <= 60 THEN 'stale'
+                ELSE 'historical'
+              END
+            WHEN julianday('now') - julianday(COALESCE(last_gr_date, order_date)) > 21
+              THEN 'stale_partial'
+            ELSE 'partial'
+          END AS bucket,
+          COUNT(*) AS n, COALESCE(SUM(open_value_cents),0) AS value_cents
+         FROM po_lines WHERE is_fully_received = 0 GROUP BY bucket`,
+      ).all<{ bucket: string; n: number; value_cents: number }>(),
+      // unresolved anomaly counts by severity
+      env.DB.prepare(
+        `SELECT severity, COUNT(*) AS n FROM anomalies WHERE resolved = 0 GROUP BY severity`,
+      ).all<{ severity: string; n: number }>(),
+      // Stale orders KPI: open lines 35–60 days old (the flagged window). Lines >60
+      // days are historical and excluded; <35 days are still active.
+      env.DB.prepare(
+        `SELECT COUNT(*) AS n FROM po_lines
+         WHERE is_fully_received = 0 AND order_date IS NOT NULL
+           AND julianday('now') - julianday(order_date) >= 35
+           AND julianday('now') - julianday(order_date) <= 60`,
+      ).first<{ n: number }>(),
+      // top open anomalies (severity, then newest)
+      env.DB.prepare(
+        `SELECT id, type, severity, message, detected_at FROM anomalies WHERE resolved = 0
+         ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 12`,
+      ).all(),
+      env.DB.prepare(
+        `SELECT id, filename, status, row_count, uploaded_at FROM uploads ORDER BY id DESC LIMIT 6`,
+      ).all(),
+      env.DB.prepare(`SELECT * FROM budgets ORDER BY period DESC`).all<{
+        period: string;
+        scope_type: string;
+        scope_ref: string | null;
+        cap_cents: number;
+      }>(),
+      buildGrYesterday(env),
+    ]);
+
   const notAged = notAgedOutSql(maxAge);
 
-  // line totals by status (raw breakdown; the Open tiles below apply the age cap)
-  const byStatus = await env.DB.prepare(
-    `SELECT line_status, COUNT(*) AS n,
-            COALESCE(SUM(open_value_cents),0) AS open_value_cents,
-            COALESCE(SUM(line_value_cents),0) AS line_value_cents
-     FROM po_lines GROUP BY line_status`,
-  ).all<{ line_status: string; n: number; open_value_cents: number; line_value_cents: number }>();
+  // Phase 2 — reads that depend on maxAge (notAged) or the guideline snapshot,
+  // again all in parallel (incl. the per-budget commitment lookups).
+  const [recon, openRow, grPanel, marginPerformance, budgets] = await Promise.all([
+    // Reconciliation-based outstanding commitment: PO value ordered minus GR value
+    // received (matches the PO Reconciliation tab). received_value is in Rand.
+    // Aged-out open lines drop out of the netting via notAged.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(line_value_cents),0) AS ordered_cents,
+              COALESCE(SUM(received_value),0)   AS received_zar,
+              SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) AS outstanding_lines
+       FROM po_lines WHERE ${notAged}`,
+    ).first<{ ordered_cents: number; received_zar: number; outstanding_lines: number }>(),
+    // Open value/lines: non-closed lines within the age cap.
+    env.DB.prepare(
+      `SELECT COALESCE(SUM(open_value_cents),0) AS open_value_cents, COUNT(*) AS n
+       FROM po_lines WHERE line_status != 'closed' AND ${notAged}`,
+    ).first<{ open_value_cents: number; n: number }>(),
+    // GR margin panel + FIM margin performance (share one guideline snapshot).
+    buildGrPanel(env, guidelines),
+    buildMarginPerformance(env, guidelines),
+    // budgets with current status (per-budget commitment lookups run concurrently)
+    Promise.all(
+      (budgetRows.results ?? []).map(async (b) => {
+        const committed = await committedOpenValueCents(
+          env,
+          b.scope_type as "overall" | "department" | "vendor",
+          b.scope_ref,
+        );
+        const used = b.cap_cents > 0 ? committed / b.cap_cents : 0;
+        return {
+          period: b.period,
+          scopeType: b.scope_type,
+          scopeRef: b.scope_ref,
+          capCents: b.cap_cents,
+          committedCents: committed,
+          remainingCents: b.cap_cents - committed,
+          usedPct: Math.round(used * 1000) / 10,
+          status: budgetStatus(used, t),
+        };
+      }),
+    ),
+  ]);
 
-  // Reconciliation-based outstanding commitment: PO value ordered minus GR value
-  // received (matches the PO Reconciliation tab). received_value is in Rand.
-  // Aged-out open lines drop out of the netting via notAged.
-  const recon = await env.DB.prepare(
-    `SELECT COALESCE(SUM(line_value_cents),0) AS ordered_cents,
-            COALESCE(SUM(received_value),0)   AS received_zar,
-            SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) AS outstanding_lines
-     FROM po_lines WHERE ${notAged}`,
-  ).first<{ ordered_cents: number; received_zar: number; outstanding_lines: number }>();
   const outstandingValueCents = Math.max(
     0,
     Math.round((recon?.ordered_cents ?? 0) - (recon?.received_zar ?? 0) * 100),
   );
   const outstandingLines = recon?.outstanding_lines ?? 0;
-
-  // Open value/lines: non-closed lines within the age cap.
-  const openRow = await env.DB.prepare(
-    `SELECT COALESCE(SUM(open_value_cents),0) AS open_value_cents, COUNT(*) AS n
-     FROM po_lines WHERE line_status != 'closed' AND ${notAged}`,
-  ).first<{ open_value_cents: number; n: number }>();
   const openValueCents = openRow?.open_value_cents ?? 0;
   const openLines = openRow?.n ?? 0;
 
-  // Open-order aging buckets. The SAP PO export carries no delivery date, so
-  // aging is measured from COALESCE(last_gr_date, order_date) per the reconciliation
-  // rules; fully-received lines are excluded (they are complete).
-  const aging = await env.DB.prepare(
-    `SELECT CASE
-        WHEN COALESCE(received_qty,0) <= 0 THEN
-          CASE
-            WHEN order_date IS NULL THEN 'no_date'
-            WHEN julianday('now') - julianday(order_date) <= 7  THEN 'new_order'
-            WHEN julianday('now') - julianday(order_date) <= 21 THEN 'awaiting'
-            WHEN julianday('now') - julianday(order_date) <= 34 THEN 'overdue'
-            WHEN julianday('now') - julianday(order_date) <= 60 THEN 'stale'
-            ELSE 'historical'
-          END
-        WHEN julianday('now') - julianday(COALESCE(last_gr_date, order_date)) > 21
-          THEN 'stale_partial'
-        ELSE 'partial'
-      END AS bucket,
-      COUNT(*) AS n, COALESCE(SUM(open_value_cents),0) AS value_cents
-     FROM po_lines WHERE is_fully_received = 0 GROUP BY bucket`,
-  ).all<{ bucket: string; n: number; value_cents: number }>();
-
-  // unresolved anomaly counts by severity
-  const sevRows = await env.DB.prepare(
-    `SELECT severity, COUNT(*) AS n FROM anomalies WHERE resolved = 0 GROUP BY severity`,
-  ).all<{ severity: string; n: number }>();
   const anomalyCounts: Record<string, number> = {};
   for (const r of sevRows.results ?? []) anomalyCounts[r.severity] = r.n;
-
-  // Stale orders KPI: open lines 35–60 days old (the flagged window). Lines >60 days
-  // are historical and excluded; <35 days are still active.
-  const staleRow = await env.DB.prepare(
-    `SELECT COUNT(*) AS n FROM po_lines
-     WHERE is_fully_received = 0 AND order_date IS NOT NULL
-       AND julianday('now') - julianday(order_date) >= 35
-       AND julianday('now') - julianday(order_date) <= 60`,
-  ).first<{ n: number }>();
-
-  // top open anomalies (severity, then newest)
-  const topAnomalies = await env.DB.prepare(
-    `SELECT id, type, severity, message, detected_at FROM anomalies WHERE resolved = 0
-     ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 12`,
-  ).all();
-
-  const recentUploads = await env.DB.prepare(
-    `SELECT id, filename, status, row_count, uploaded_at FROM uploads ORDER BY id DESC LIMIT 6`,
-  ).all();
-
-  // budgets with current status
-  const budgetRows = await env.DB.prepare(`SELECT * FROM budgets ORDER BY period DESC`).all<{
-    period: string;
-    scope_type: string;
-    scope_ref: string | null;
-    cap_cents: number;
-  }>();
-  const budgets = [];
-  for (const b of budgetRows.results ?? []) {
-    const committed = await committedOpenValueCents(
-      env,
-      b.scope_type as "overall" | "department" | "vendor",
-      b.scope_ref,
-    );
-    const used = b.cap_cents > 0 ? committed / b.cap_cents : 0;
-    budgets.push({
-      period: b.period,
-      scopeType: b.scope_type,
-      scopeRef: b.scope_ref,
-      capCents: b.cap_cents,
-      committedCents: committed,
-      remainingCents: b.cap_cents - committed,
-      usedPct: Math.round(used * 1000) / 10,
-      status: budgetStatus(used, t),
-    });
-  }
-
-  // GR margin panel + FIM margin performance (share one guideline snapshot).
-  const guidelines = await fetchCurrentGuidelines(env);
-  const grPanel = await buildGrPanel(env, guidelines);
-  const grYesterday = await buildGrYesterday(env);
-  const marginPerformance = await buildMarginPerformance(env, guidelines);
 
   return json({
     store: STORE,
