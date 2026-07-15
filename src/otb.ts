@@ -7,7 +7,7 @@
  * SAME growth/margin assumptions (settings) so they stay consistent.
  */
 import { type Env } from "./config";
-import { openPoMaxAgeDays, notAgedOutSql } from "./db/repo";
+import { openPoMaxAgeDays, notAgedOutSql, notManuallyClosedSql } from "./db/repo";
 import { resolveDeptName } from "./departments";
 
 function json(data: unknown, status = 200): Response {
@@ -76,7 +76,7 @@ async function placedByDept(env: Env, ws: string, we: string): Promise<Map<strin
   const res = await env.DB.prepare(
     `SELECT substr(mdse_cat,1,3) dept,
             ROUND(SUM(CASE WHEN COALESCE(sloc,'')='S002' THEN -COALESCE(line_value_cents,0) ELSE COALESCE(line_value_cents,0) END)/100.0,2) net
-     FROM po_lines WHERE order_date BETWEEN ? AND ? AND mdse_cat IS NOT NULL AND ${notAged}
+     FROM po_lines WHERE order_date BETWEEN ? AND ? AND mdse_cat IS NOT NULL AND ${notAged} AND ${notManuallyClosedSql()}
      GROUP BY substr(mdse_cat,1,3)`,
   ).bind(ws, we).all<{ dept: string; net: number }>();
   return new Map((res.results ?? []).map((r) => [r.dept, r.net]));
@@ -87,7 +87,7 @@ async function storePlacedExact(env: Env, ws: string, we: string): Promise<numbe
   const notAged = notAgedOutSql(await openPoMaxAgeDays(env));
   const row = await env.DB.prepare(
     `SELECT ROUND(SUM(CASE WHEN COALESCE(sloc,'')='S002' THEN -COALESCE(line_value_cents,0) ELSE COALESCE(line_value_cents,0) END)/100.0) net
-     FROM po_lines WHERE order_date BETWEEN ? AND ? AND ${notAged}`,
+     FROM po_lines WHERE order_date BETWEEN ? AND ? AND ${notAged} AND ${notManuallyClosedSql()}`,
   ).bind(ws, we).first<{ net: number | null }>();
   return r0(row?.net ?? 0);
 }

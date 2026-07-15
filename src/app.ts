@@ -310,6 +310,7 @@ var NAV=[
  ["budgets","\\uD83C\\uDFAF","Weekly Budgets"],
  ["otb","\\uD83D\\uDED2","Open-to-Buy"],
  ["open","\\uD83D\\uDCCB","Open Orders"],
+ ["closures","\\uD83D\\uDEAB","Manually Closed"],
  ["returns","\\u21A9","Returns to Vendor"],
  ["anomalies","\\u26A0","Risk & Anomalies"],
  ["gr","\\uD83D\\uDE9A","Goods Receipts"],
@@ -325,7 +326,7 @@ var NAV=[
 // per-group in localStorage under "nav-<group id>" (default expanded).
 var NAV_GROUPS=[
  {id:"g-overview",label:"Overview",items:["dashboard","brief","trading","weekly","monthly","fy","customers","fanscore"]},
- {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","otb","open","returns","gr","vendors","cash","settlement"]},
+ {id:"g-purchasing",label:"Purchasing",items:["purchase-orders","budgets","otb","open","closures","returns","gr","vendors","cash","settlement"]},
  {id:"g-analysis",label:"Analysis",items:["deptleague","departments","gpbridge","articles","categories","ima","hierarchy","waste","period","stock","funding","shortage","anomalies"]},
  {id:"g-admin",label:"Admin",items:["upload","coverage","settings","export"]}
 ];
@@ -1037,7 +1038,7 @@ PAGES.dashboard=function(){loading();api("/api/dashboard").then(function(d){
   h+='<div class="dash-sec">Risk &amp; Alerts</div>';
   var staleVal=(agMap["stale"]&&agMap["stale"].value_cents||0)/100;
   var critTile='<div class="card kpi clik" onclick="location.hash=\\'#anomalies\\'" title="Open Risk &amp; Anomalies"><div class="v"><span class="'+(crit?"neg":"")+'">'+crit+'</span></div><div class="l">Critical anomalies</div><div class="sub">unacknowledged</div></div>';
-  var staleTile='<div class="card kpi clik" onclick="location.hash=\\'#open\\'" title="Open stale orders"><div class="v">'+num(d.staleOpenOrders)+'</div><div class="l">Stale orders (35-60d)</div><div class="sub">'+Rr0(staleVal)+'</div></div>';
+  var staleTile='<div class="card kpi clik" onclick="location.hash=\\'#open\\'" title="Open stale orders"><div class="v">'+num(d.staleOpenOrders)+'</div><div class="l">Stale orders (35-59d)</div><div class="sub">'+Rr0(staleVal)+'</div></div>';
   h+='<div class="cards g3">'+critTile+staleTile+'<div id="dashWaste"><div class="card"><div class="loading">Loading\\u2026</div></div></div></div>';
 
   // ---- MARGIN PERFORMANCE (prev complete FIM week) ----
@@ -2203,7 +2204,7 @@ PAGES.shortage=function(){fimAnalysis("shperiod","shbody",function(el,deps){
 
 PAGES.open=function(){
   var rp=routeParams();
-  setHTML('<div class="toolbar"><label class="small muted">Filter</label><select class="sel" id="ofilter"><option value="both">Open to deliver or invoice</option><option value="deliver">Open to deliver</option><option value="invoice">Open to invoice</option></select></div><div id="obody"><div class="loading">Loading\\u2026</div></div>');
+  setHTML('<div class="toolbar"><label class="small muted">Filter</label><select class="sel" id="ofilter"><option value="both">Open to deliver or invoice</option><option value="deliver">Open to deliver</option><option value="invoice">Open to invoice</option></select><span style="flex:1"></span><a class="link" href="#closures">Manually closed \\u2192</a></div><div id="obody"><div class="loading">Loading\\u2026</div></div>');
   function load(f){api("/api/open-orders?filter="+f+"&limit=3000").then(function(d){
     var ag=d.aging||{count:{},value:{}};var c=ag.count||{},v=ag.value||{};
     function tile(lab,key,danger){return kpi(lab,danger&&c[key]?'<span class="neg">'+num(c[key])+'</span>':num(c[key]),Rr0(v[key]||0))}
@@ -2211,10 +2212,10 @@ PAGES.open=function(){
       +tile("New order (0-7d)","new_order",false)
       +tile("Awaiting (8-21d)","awaiting",false)
       +tile("Overdue (22-34d)","overdue",true)
-      +tile("Stale (35-60d)","stale",true)
-      +kpi("Historical (>60d)",'<span class="muted">'+num(c.historical||0)+'</span>',Rr0(v.historical||0))
+      +tile("Stale (35-59d)","stale",true)
       +tile("Partial","partial",false)
-      +tile("Stale partial","stale_partial",true)+'</div>';
+      +tile("Stale partial","stale_partial",true)+'</div>'
+      +'<div class="muted small" style="margin:-4px 0 10px">Orders \\u226560 days old are auto-closed (excluded from Open/Committed by age). Use \\u201cMark stale\\u201d to exclude a still-live PO manually \\u2014 see <a class="link" href="#closures">Manually closed</a>.</div>';
     h+='<div class="card"><h2>Open order lines ('+(d.rows||[]).length+')</h2>'+makeTable([
       {key:"po_number",label:"PO",html:function(r){return poLink(r.po_number)}},
       {key:"article_code",label:"Article",html:function(r){return artLink(r.article_code)}},
@@ -2226,14 +2227,41 @@ PAGES.open=function(){
       {key:"received_value",label:"Received value",num:true,fmt:Rr},
       {key:"outstanding_value",label:"Outstanding value",num:true,fmt:Rr},
       {key:"last_gr_date",label:"Last GR",html:function(r){return esc(r.last_gr_date||"\\u2014")}},
-      {key:"days_outstanding",label:"Days",num:true,html:function(r){var dn=r.days_outstanding;var cls=dn==null?"":(dn>60?"muted":(dn>=35?"neg":""));return '<span class="'+cls+'">'+(dn==null?"\\u2014":dn)+'</span>'}},
-      {key:"status",label:"Status"},{key:"bucket",label:"Bucket"}
+      {key:"days_outstanding",label:"Days",num:true,html:function(r){var dn=r.days_outstanding;var cls=dn==null?"":(dn>=60?"muted":(dn>=35?"neg":""));return '<span class="'+cls+'">'+(dn==null?"\\u2014":dn)+'</span>'}},
+      {key:"status",label:"Status"},{key:"bucket",label:"Bucket"},
+      {key:"_act",label:"",html:function(r){return '<button class="btn alt" data-mark-stale="'+esc(r.po_number)+'" title="Declare this PO stale \\u2014 exclude it from every open/committed figure (reversible)">Mark stale</button>'}}
     ],d.rows||[],{rowMenu:true,cards:true})+'</div>';
     $("obody").innerHTML=h;
   }).catch(function(e){$("obody").innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
   $("ofilter").onchange=function(){load(this.value)};load("both");
   // Drill-through from a stale-order anomaly: open that PO directly.
   if(rp.po)openPO(rp.po);
+};
+
+// Manually-closed ("declared stale") POs: audit list with per-row Reopen. Each row
+// shows the exact Open-Committed value the closure excludes, and whether the PO is
+// ALSO past the 60-day auto-close (so aged vs manual-only is visible at a glance).
+PAGES.closures=function(){
+  setHTML('<div class="toolbar"><a class="link" href="#open">\\u2190 Open Orders</a></div><div id="clbody"><div class="loading">Loading\\u2026</div></div>');
+  api("/api/po-closures").then(function(d){
+    var cl=d.closures||[];
+    var totalExcl=cl.reduce(function(a,r){return a+(r.excluded_cents||0)},0);
+    var h='<div class="cards kpis">'+kpi("Manually closed POs",num(cl.length),null)+kpi("Excluded from Open Committed",R(totalExcl),"S001 outstanding")+'</div>';
+    if(!cl.length){h+='<div class="card"><div class="muted small" style="padding:16px">No manual closures. Use \\u201cMark stale\\u201d on an open order to exclude a still-live PO from every open/committed figure.</div></div>';}
+    else{
+      h+='<div class="card"><h2>Manually closed (declared stale)</h2>'+makeTable([
+        {key:"po_number",label:"PO",html:function(r){return poLink(r.po_number)}},
+        {key:"vendor",label:"Vendor",html:function(r){return venLink(r.vendor_code,r.vendor)}},
+        {key:"excluded_cents",label:"Value excluded",num:true,html:function(r){return R(r.excluded_cents)}},
+        {key:"open_lines",label:"Open lines",num:true},
+        {key:"age_days",label:"Age",num:true,html:function(r){var a=r.age_days;if(a==null)return "\\u2014";return a+"d "+(a>=60?'<span class="pill muted" title="Also past the 60-day auto-close">+ aged</span>':'<span class="pill" style="background:#8a5a00;color:#fff" title="Excluded by manual closure only \\u2014 aging would not catch it">manual only</span>')}},
+        {key:"closed_at",label:"Closed",html:function(r){return esc((r.closed_at||"").slice(0,10))+(r.closed_by?' <span class="muted small">by '+esc(r.closed_by)+'</span>':'')}},
+        {key:"note",label:"Note",html:function(r){return esc(r.note||"\\u2014")}},
+        {key:"_act",label:"",html:function(r){return '<button class="btn alt" data-reopen-po="'+esc(r.po_number)+'" title="Reopen \\u2014 the PO re-enters all open/committed figures">Reopen</button>'}}
+      ],cl,{cards:true})+'</div>';
+    }
+    $("clbody").innerHTML=h;
+  }).catch(function(e){$("clbody").innerHTML='<div class="err">'+esc(e.message)+'</div>'});
 };
 
 PAGES.returns=function(){
@@ -3049,6 +3077,11 @@ window.addEventListener("hashchange",go);
 document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-drill]"):null;if(!row)return;var drill=row.getAttribute("data-drill");if(drill){ev.preventDefault();location.hash="#"+drill;}});
 // Settlement drill: a [data-liv] row opens the LIV detail modal (EOD GR rows + statement lines).
 document.addEventListener("click",function(ev){var t=ev.target;var row=(t&&t.closest)?t.closest("[data-liv]"):null;if(!row)return;var liv=row.getAttribute("data-liv");if(liv)openSettlementLiv(liv);});
+// Mark a PO stale (admin): prompt for an optional note, POST the manual closure, then
+// re-render the current screen so the PO drops out of the open view immediately.
+document.addEventListener("click",function(ev){var t=ev.target;var b=(t&&t.closest)?t.closest("[data-mark-stale]"):null;if(!b)return;ev.preventDefault();ev.stopPropagation();var po=b.getAttribute("data-mark-stale");var note=window.prompt("Mark PO "+po+" stale?\\nIt will be excluded from every open/committed figure (reversible via Manually Closed).\\nOptional note:","");if(note===null)return;b.disabled=true;adminSend("/api/po-closures","POST",{poNumber:po,note:note,closedBy:"buyer"}).then(function(r){if(r&&r.error)throw new Error(r.error);go()}).catch(function(e){b.disabled=false;alert("Could not mark stale: "+(e&&e.message||e))});});
+// Reopen a manual closure (admin): re-enter the PO into all open figures.
+document.addEventListener("click",function(ev){var t=ev.target;var b=(t&&t.closest)?t.closest("[data-reopen-po]"):null;if(!b)return;ev.preventDefault();ev.stopPropagation();var po=b.getAttribute("data-reopen-po");if(!window.confirm("Reopen PO "+po+"? It will re-enter all open/committed figures."))return;b.disabled=true;adminSend("/api/po-closures/reopen","POST",{poNumber:po}).then(function(r){if(r&&r.error)throw new Error(r.error);go()}).catch(function(e){b.disabled=false;alert("Could not reopen: "+(e&&e.message||e))});});
 // Clicking a link to the CURRENT route sets an identical hash, which fires no
 // hashchange — so the target screen would not re-render. Force a deterministic
 // re-render for that case (a different hash still routes normally via hashchange).

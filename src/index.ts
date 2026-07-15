@@ -30,6 +30,7 @@ import {
   markUploadError,
   markUploadParsed,
   committedOpenValueCents,
+  openCommitted,
   openPoMaxAgeDays,
   notAgedOutSql,
   insertEodMovements,
@@ -2003,13 +2004,14 @@ async function handleDashboard(env: Env): Promise<Response> {
       env.DB.prepare(
         `SELECT severity, COUNT(*) AS n FROM anomalies WHERE resolved = 0 GROUP BY severity`,
       ).all<{ severity: string; n: number }>(),
-      // Stale orders KPI: open lines 35–60 days old (the flagged window). Lines >60
-      // days are historical and excluded; <35 days are still active.
+      // Stale orders KPI: open lines 35–59 days old (the flagged window, tightened
+      // with the 60-day auto-close). Lines ≥60 days are auto-closed (excluded from
+      // Open/Committed); <35 days are still active.
       env.DB.prepare(
         `SELECT COUNT(*) AS n FROM po_lines
          WHERE is_fully_received = 0 AND order_date IS NOT NULL
-           AND julianday('now') - julianday(order_date) >= 35
-           AND julianday('now') - julianday(order_date) <= 60`,
+           AND order_date <= date('now','-35 days')
+           AND order_date >  date('now','-60 days')`,
       ).first<{ n: number }>(),
       // top open anomalies (severity, then newest)
       env.DB.prepare(
@@ -2032,16 +2034,11 @@ async function handleDashboard(env: Env): Promise<Response> {
 
   // Phase 2 — reads that depend on maxAge (notAged) or the guideline snapshot,
   // again all in parallel (incl. the per-budget commitment lookups).
-  const [recon, openRow, grPanel, marginPerformance, budgets] = await Promise.all([
-    // Reconciliation-based outstanding commitment: PO value ordered minus GR value
-    // received (matches the PO Reconciliation tab). received_value is in Rand.
-    // Aged-out open lines drop out of the netting via notAged.
-    env.DB.prepare(
-      `SELECT COALESCE(SUM(line_value_cents),0) AS ordered_cents,
-              COALESCE(SUM(received_value),0)   AS received_zar,
-              SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) AS outstanding_lines
-       FROM po_lines WHERE ${notAged}`,
-    ).first<{ ordered_cents: number; received_zar: number; outstanding_lines: number }>(),
+  const [committed, openRow, grPanel, marginPerformance, budgets] = await Promise.all([
+    // Open Committed — THE single shared figure (S001-only netting, aged-out and
+    // manually-closed POs excluded). Same openCommitted() as /api/dashboard/tiles
+    // and /api/po-lines/list, so every screen shows one identical number.
+    openCommitted(env),
     // Open value/lines: non-closed lines within the age cap.
     env.DB.prepare(
       `SELECT COALESCE(SUM(open_value_cents),0) AS open_value_cents, COUNT(*) AS n
@@ -2073,11 +2070,8 @@ async function handleDashboard(env: Env): Promise<Response> {
     ),
   ]);
 
-  const outstandingValueCents = Math.max(
-    0,
-    Math.round((recon?.ordered_cents ?? 0) - (recon?.received_zar ?? 0) * 100),
-  );
-  const outstandingLines = recon?.outstanding_lines ?? 0;
+  const outstandingValueCents = committed.valueCents;
+  const outstandingLines = committed.lines;
   const openValueCents = openRow?.open_value_cents ?? 0;
   const openLines = openRow?.n ?? 0;
 
@@ -2098,6 +2092,71 @@ async function handleDashboard(env: Env): Promise<Response> {
     grYesterday,
     marginPerformance,
   });
+}
+
+// --- Manual "declare stale" PO closures (companion to the age auto-close) --------
+
+/** POST /api/po-closures — mark a PO stale (exclude from all open calcs). Body:
+ *  { poNumber, note?, closedBy? }. Upsert: a re-close clears any prior reopened_at
+ *  and stamps a fresh closed_at. Never mutates po_lines. Admin-gated by the caller. */
+async function handleMarkStale(req: Request, env: Env): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { poNumber?: string; note?: string; closedBy?: string } | null;
+  const poNumber = (body?.poNumber ?? "").trim();
+  if (!poNumber) return json({ error: "poNumber required" }, 400);
+  const exists = await env.DB.prepare(`SELECT 1 FROM po_lines WHERE po_number = ? LIMIT 1`).bind(poNumber).first();
+  if (!exists) return json({ error: `Unknown PO ${poNumber}` }, 404);
+  const note = body?.note?.trim() || null;
+  const closedBy = body?.closedBy?.trim() || null;
+  await env.DB.prepare(
+    `INSERT INTO po_manual_closures (po_number, closed_at, closed_by, note, reopened_at)
+     VALUES (?, strftime('%Y-%m-%dT%H:%M:%SZ','now'), ?, ?, NULL)
+     ON CONFLICT(po_number) DO UPDATE SET
+       closed_at = strftime('%Y-%m-%dT%H:%M:%SZ','now'), closed_by = excluded.closed_by,
+       note = excluded.note, reopened_at = NULL`,
+  ).bind(poNumber, closedBy, note).run();
+  return json({ ok: true, poNumber });
+}
+
+/** POST /api/po-closures/reopen — reverse a manual closure (keeps the row for audit).
+ *  Body: { poNumber }. Sets reopened_at so the PO re-enters open calcs. Admin-gated. */
+async function handleReopenClosure(req: Request, env: Env): Promise<Response> {
+  const body = (await req.json().catch(() => null)) as { poNumber?: string } | null;
+  const poNumber = (body?.poNumber ?? "").trim();
+  if (!poNumber) return json({ error: "poNumber required" }, 400);
+  const r = await env.DB.prepare(
+    `UPDATE po_manual_closures SET reopened_at = strftime('%Y-%m-%dT%H:%M:%SZ','now')
+     WHERE po_number = ? AND reopened_at IS NULL`,
+  ).bind(poNumber).run();
+  if ((r.meta.changes ?? 0) === 0) return json({ error: `No active closure for ${poNumber}` }, 404);
+  return json({ ok: true, poNumber });
+}
+
+/** GET /api/po-closures — active manual closures with vendor + the exact Open
+ *  Committed contribution each one removes (same S001 netting as openCommitted,
+ *  scoped to the PO), plus its open-line count and age. */
+async function handleListClosures(env: Env): Promise<Response> {
+  const notAged = notAgedOutSql(await openPoMaxAgeDays(env), "p");
+  const rows = await env.DB.prepare(
+    `SELECT c.po_number, c.closed_at, c.closed_by, c.note,
+            (SELECT v.vendor_code FROM po_lines p LEFT JOIN vendors v ON v.id = p.vendor_id
+               WHERE p.po_number = c.po_number LIMIT 1) AS vendor_code,
+            (SELECT v.name FROM po_lines p LEFT JOIN vendors v ON v.id = p.vendor_id
+               WHERE p.po_number = c.po_number LIMIT 1) AS vendor,
+            COALESCE((SELECT SUM(p.line_value_cents - COALESCE(p.received_value,0) * 100)
+               FROM po_lines p WHERE p.po_number = c.po_number
+                 AND COALESCE(p.sloc,'') != 'S002' AND ${notAged}), 0) AS excluded_cents,
+            COALESCE((SELECT SUM(CASE WHEN p.is_fully_received = 0 THEN 1 ELSE 0 END)
+               FROM po_lines p WHERE p.po_number = c.po_number
+                 AND COALESCE(p.sloc,'') != 'S002' AND ${notAged}), 0) AS open_lines,
+            (SELECT CAST(julianday('now') - julianday(MIN(p.order_date)) AS INTEGER)
+               FROM po_lines p WHERE p.po_number = c.po_number) AS age_days
+     FROM po_manual_closures c WHERE c.reopened_at IS NULL
+     ORDER BY c.closed_at DESC`,
+  ).all<{
+    po_number: string; closed_at: string; closed_by: string | null; note: string | null;
+    vendor_code: string | null; vendor: string | null; excluded_cents: number; open_lines: number; age_days: number | null;
+  }>();
+  return json({ closures: rows.results ?? [] });
 }
 
 /**
@@ -2579,6 +2638,15 @@ export default {
       if (categoryDetail && m === "GET") return await handleCategoryDetail(env, decodeURIComponent(categoryDetail[1]!));
       if (path === "/api/departments-po" && m === "GET") return await handleDepartmentsPo(req, env);
       if (path === "/api/open-orders" && m === "GET") return await handleOpenOrders(req, env);
+      if (path === "/api/po-closures" && m === "GET") return await handleListClosures(env);
+      if (path === "/api/po-closures" && m === "POST") {
+        if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
+        return await handleMarkStale(req, env);
+      }
+      if (path === "/api/po-closures/reopen" && m === "POST") {
+        if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
+        return await handleReopenClosure(req, env);
+      }
       if (path === "/api/returns" && m === "GET") return await handleReturns(req, env);
       if (path === "/api/gr/reconciliation" && m === "GET") return await handleGrReconciliation(env);
       if (path === "/api/reconciliation" && m === "GET") return await handleReconciliation(req, env);

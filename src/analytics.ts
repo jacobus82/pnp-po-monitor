@@ -1,5 +1,5 @@
 import { type Env, thresholds, budgetStatus } from "./config";
-import { openPoMaxAgeDays, notAgedOutSql } from "./db/repo";
+import { openPoMaxAgeDays, openPoPredicate, openCommitted } from "./db/repo";
 import { fiscalCalendar } from "./fiscal";
 import { guidelineKeyForDept } from "./guidelines";
 import { resolveDeptName } from "./departments";
@@ -559,7 +559,7 @@ export async function handleOpenOrders(req: Request, env: Env): Promise<Response
   const q = new URL(req.url).searchParams;
   const filter = q.get("filter") ?? "both";
   const limit = Math.min(Number(q.get("limit") ?? "1000"), 5000);
-  const notAged = notAgedOutSql(await openPoMaxAgeDays(env), "p"); // auto-close aged open POs
+  const openPo = openPoPredicate(await openPoMaxAgeDays(env), "p"); // open = not received, not aged out, not manually closed
   let cond = "(COALESCE(p.open_value_cents,0) > 0 OR COALESCE(p.open_invoice_cents,0) > 0)";
   if (filter === "deliver") cond = "COALESCE(p.open_value_cents,0) > 0";
   else if (filter === "invoice") cond = "COALESCE(p.open_invoice_cents,0) > 0";
@@ -571,7 +571,7 @@ export async function handleOpenOrders(req: Request, env: Env): Promise<Response
             p.line_value_cents, p.open_value_cents, p.open_invoice_cents, p.last_gr_date,
             CAST(julianday('now') - julianday(COALESCE(p.last_gr_date, p.order_date)) AS INTEGER) days_outstanding
      FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id LEFT JOIN articles a ON a.id=p.article_id
-     WHERE p.is_fully_received = 0 AND ${notAged} AND ${cond}
+     WHERE ${openPo} AND ${cond}
      ORDER BY days_outstanding DESC LIMIT ?`,
   )
     .bind(limit)
@@ -1842,13 +1842,12 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
   const q = new URL(req.url).searchParams;
   const { key, from, to, label } = await resolvePeriod(env, q.get("period"), q.get("from"), q.get("to"));
   const t = thresholds(env);
-  const notAged = notAgedOutSql(await openPoMaxAgeDays(env)); // auto-close aged open POs
 
   // Eight independent reads once the period is resolved — the PO gross/returns/net
   // split, GR actual, the weekly cap, the fiscal weeks overlapping the period, the
   // store-budget map, the open-committed reconciliation, the sales windows, and the
   // last complete FIM week — all run concurrently instead of one after another.
-  const [poGrn, grRow, defaultCapZar, periodWeeksRes, storeMap, recon, sw, prevWeek] = await Promise.all([
+  const [poGrn, grRow, defaultCapZar, periodWeeksRes, storeMap, committed, sw, prevWeek] = await Promise.all([
     poGrnCents(env, from, to),
     env.DB.prepare(
       `SELECT COALESCE(SUM(cost_zar),0) cost, COALESCE(SUM(sell_zar),0) sell FROM gr_lines WHERE gr_date >= ? AND gr_date <= ?`,
@@ -1863,11 +1862,7 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
       .bind(to, from)
       .all<{ fiscal_week_code: string; week_start: string; week_end: string }>(),
     storeBudgetMap(env),
-    env.DB.prepare(
-      `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar,
-            SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) lines FROM po_lines
-     WHERE COALESCE(sloc,'') != 'S002' AND ${notAged}`,
-    ).first<{ ordered_cents: number; received_zar: number; lines: number }>(),
+    openCommitted(env), // THE shared Open Committed figure (S001 netting, aged/manual excluded)
     salesWindowsCents(env),
     prevCompleteFimWeek(env),
   ]);
@@ -1901,9 +1896,9 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
   const poUsed = poBudgetCents > 0 ? poActualCents / poBudgetCents : 0;
   const grUsed = grBudgetCents > 0 ? grActualCents / grBudgetCents : 0;
 
-  // Open committed: PO ordered minus GR received (matches the dashboard KPI).
+  // Open committed: THE shared figure (matches the dashboard KPI + po-lines list).
   // S001 ONLY — S002 returns are incoming credits, not future cash outflows.
-  const openCommittedCents = Math.max(0, Math.round((recon?.ordered_cents ?? 0) - (recon?.received_zar ?? 0) * 100));
+  const openCommittedCents = committed.valueCents;
 
   const latest = sw.latestDate;
   const weekStart = sw.weekStart;
@@ -2008,7 +2003,7 @@ export async function handleDashboardTiles(req: Request, env: Env): Promise<Resp
       usedPct: Math.round(grUsed * 1000) / 10,
       status: budgetStatus(grUsed, t),
     },
-    openCommitted: { valueCents: openCommittedCents, lines: recon?.lines ?? 0 },
+    openCommitted: { valueCents: openCommittedCents, lines: committed.lines },
     windows: {
       latestDate: latest,
       yesterday: mkWin(sw.yesterdayCents, ydayBudgetC, wY),
@@ -2328,7 +2323,6 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
   const dept = q.get("dept");
   const limit = Math.min(Number(q.get("limit") ?? "200"), 1000);
   const offset = Math.max(Number(q.get("offset") ?? "0"), 0);
-  const notAged = notAgedOutSql(await openPoMaxAgeDays(env)); // auto-close aged open POs
 
   // Base scope = period + vendor + dept (drives the gross/returns/net summary
   // cards). The status filter is layered on top only for the line LIST.
@@ -2353,7 +2347,7 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
   // Five independent po_lines reads — status summary, period cards (gross/returns/
   // net), the GLOBAL open-committed figure, returns-by-vendor, and the line page —
   // all run concurrently instead of one after another.
-  const [summary, cards, oc, retRows, rows] = await Promise.all([
+  const [summary, cards, committed, retRows, rows] = await Promise.all([
     env.DB.prepare(
       `SELECT COUNT(*) lines, COALESCE(SUM(${PURCH}),0) value_cents
      FROM po_lines p LEFT JOIN vendors v ON v.id=p.vendor_id ${scope}`,
@@ -2373,12 +2367,9 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
     )
       .bind(...baseBinds)
       .first<{ gross_cents: number; net_cents: number; gross_lines: number; returns_lines: number; net_lines: number; vendors: number }>(),
-    // Open Committed — GLOBAL, S001 only. Same definition as the dashboard KPI
-    // (ordered minus received across all S001 lines); returns (S002) excluded.
-    env.DB.prepare(
-      `SELECT COALESCE(SUM(line_value_cents),0) ordered_cents, COALESCE(SUM(received_value),0) received_zar
-     FROM po_lines WHERE COALESCE(sloc,'') != 'S002' AND ${notAged}`,
-    ).first<{ ordered_cents: number; received_zar: number }>(),
+    // Open Committed — GLOBAL. THE shared openCommitted() figure, identical to the
+    // dashboard KPI and /api/dashboard/tiles (S001 netting; aged/manual excluded).
+    openCommitted(env),
     env.DB.prepare(
       `SELECT v.vendor_code code, v.name, COUNT(*) lines, COALESCE(SUM(p.line_value_cents),0) ret_cents
      FROM po_lines p LEFT JOIN vendors v ON v.id = p.vendor_id ${retScope}
@@ -2401,7 +2392,7 @@ export async function handlePoLinesList(req: Request, env: Env): Promise<Respons
   ]);
   const grossCents = Number(cards?.gross_cents ?? 0);
   const netCents = Number(cards?.net_cents ?? 0);
-  const openCommittedCents = Math.max(0, Math.round((oc?.ordered_cents ?? 0) - (oc?.received_zar ?? 0) * 100));
+  const openCommittedCents = committed.valueCents;
 
   const lines = (rows.results ?? []).map((r) => {
     const rec = reconcileLine({

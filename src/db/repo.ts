@@ -841,7 +841,7 @@ export async function fimWeekCompleteDepts(
 }
 
 /** Default max age (days) before an open PO line is treated as auto-closed. */
-export const DEFAULT_OPEN_PO_MAX_AGE_DAYS = 90;
+export const DEFAULT_OPEN_PO_MAX_AGE_DAYS = 60;
 
 /**
  * Auto-close threshold: open PO lines older than this many days (from order_date)
@@ -875,6 +875,48 @@ export function notAgedOutSql(maxAgeDays: number, prefix = ""): string {
   return `NOT (${p}is_fully_received = 0 AND ${p}order_date IS NOT NULL AND ${p}order_date <= date('now', '-${d} days'))`;
 }
 
+/**
+ * SQL predicate that is FALSE for POs with an ACTIVE manual closure (buyer declared
+ * the PO stale and hasn't reopened it), TRUE otherwise. A manual closure excludes the
+ * PO from every open/committed calculation regardless of age — same effect as aging
+ * out — without mutating po_lines. `prefix` is the po_lines alias when qualified.
+ */
+export function notManuallyClosedSql(prefix = ""): string {
+  const p = prefix ? prefix + "." : "";
+  return `${p}po_number NOT IN (SELECT po_number FROM po_manual_closures WHERE reopened_at IS NULL)`;
+}
+
+/**
+ * THE shared open-PO predicate. A po_lines row is an open commitment iff it is:
+ *   not fully received  AND  order age < open_po_max_age_days  AND  no active manual closure.
+ * Every open/committed line-level query must use this so aging out and manual "declare
+ * stale" take effect identically everywhere. `prefix` is the po_lines alias.
+ */
+export function openPoPredicate(maxAgeDays: number, prefix = ""): string {
+  const p = prefix ? prefix + "." : "";
+  return `${p}is_fully_received = 0 AND ${notAgedOutSql(maxAgeDays, prefix)} AND ${notManuallyClosedSql(prefix)}`;
+}
+
+/**
+ * THE single "Open Committed" figure, used by /api/dashboard, /api/dashboard/tiles and
+ * /api/po-lines/list so all screens show one identical number. Store-wide netting:
+ * gross ordered (S001 only — returns/S002 excluded per house rule) minus received,
+ * over lines that are not aged out and not manually closed. `lines` is the open-line
+ * count (is_fully_received = 0). Value never goes negative.
+ */
+export async function openCommitted(env: Env): Promise<{ valueCents: number; lines: number }> {
+  const notAged = notAgedOutSql(await openPoMaxAgeDays(env));
+  const r = await env.DB.prepare(
+    `SELECT COALESCE(SUM(line_value_cents),0) AS ordered_cents,
+            COALESCE(SUM(received_value),0)   AS received_zar,
+            SUM(CASE WHEN is_fully_received = 0 THEN 1 ELSE 0 END) AS lines
+     FROM po_lines
+     WHERE COALESCE(sloc,'') != 'S002' AND ${notAged} AND ${notManuallyClosedSql()}`,
+  ).first<{ ordered_cents: number; received_zar: number; lines: number }>();
+  const valueCents = Math.max(0, Math.round((r?.ordered_cents ?? 0) - (r?.received_zar ?? 0) * 100));
+  return { valueCents, lines: r?.lines ?? 0 };
+}
+
 /** Committed (open) value in cents, optionally scoped to a department or vendor. */
 export async function committedOpenValueCents(
   env: Env,
@@ -883,7 +925,7 @@ export async function committedOpenValueCents(
 ): Promise<number> {
   const maxAge = await openPoMaxAgeDays(env);
   let sql = `SELECT COALESCE(SUM(open_value_cents),0) AS total FROM po_lines
-             WHERE line_status != 'closed' AND ${notAgedOutSql(maxAge)}`;
+             WHERE ${openPoPredicate(maxAge)}`;
   const binds: unknown[] = [];
   if (scopeType === "department" && scopeRef) {
     sql += ` AND article_id IN (SELECT id FROM articles WHERE department = ?)`;
