@@ -1676,9 +1676,9 @@ PAGES.monthly=function(){
     api("/api/fiscal/week?date="+m+"-15").then(function(fw){if(fw.week)$("mfiscal").textContent="FY"+fw.week.fiscal_year+" \\u00b7 "+fw.week.fiscal_period_code}).catch(function(){});
     Promise.all([api("/api/purchases/summary?groupBy=week&from="+from+"&to="+to),api("/api/settings"),api("/api/gr/period?from="+from+"&to="+to),api("/api/fim/period?from="+from+"&to="+to)]).then(function(res){
       var sum=res[0],sett=res[1].settings||{},gr=res[2],fim=res[3];var t=sum.totals||{};
-      var weeklyCap=Number(sett.weekly_cap||2000000);var nWeeks=(sum.series||[]).length||4;var monthCap=weeklyCap*nWeeks*100;var used=monthCap?Math.round((t.purchases||0)/monthCap*1000)/10:0;
+      var weeklyCap=Number(sett.weekly_cap||2000000);var nWeeks=(sum.series||[]).length||4;var monthCap=weeklyCap*nWeeks*100;var mNet=(t.purchases||0)-(t.returns||0);var used=monthCap?Math.round(mNet/monthCap*1000)/10:0;
       var series=(sum.series||[]).map(function(s){return {label:s.label,short:s.key.slice(-3),value:(s.purchases||0)/100}});
-      var h='<div class="cards kpis">'+kpi("Purchases (month)",R(t.purchases),null)+kpi("Returns",R(t.returns),null)+kpi("Lines",num(t.lines),null)+kpi("Budget used",used+"%",statusPill(trafficFor(used)))+'</div>';
+      var h='<div class="cards kpis">'+kpi("Total purchase orders",R(mNet),"net \\u00b7 gross "+R(t.purchases))+kpi("Returns",R(t.returns),null)+kpi("Lines",num(t.lines),null)+kpi("Budget used",used+"%",statusPill(trafficFor(used))+" \\u00b7 net")+'</div>';
       h+='<div class="card"><h2>Purchases per week vs budget</h2>'+colChart(series,{budget:weeklyCap})+'<div class="legend">Red dashed = weekly cap '+R0(weeklyCap*100)+'</div></div>';
       h+='<div class="card" style="margin-top:14px"><h2>Week-by-week breakdown</h2>'+makeTable([{key:"label",label:"Week"},{key:"purchases",label:"Purchases",num:true,fmt:function(v,r){return R(r.purchases)}},{key:"returns",label:"Returns",num:true,fmt:function(v,r){return R(r.returns)}},{key:"lines",label:"Lines",num:true}],(sum.series||[]),{search:false,rowMenu:false})+'</div>';
       h+=grFimSection(gr,fim);
@@ -1700,7 +1700,8 @@ PAGES.fy=function(){
     var series=(sum.series||[]).map(function(s){return {label:s.label,short:s.key.slice(5),value:(s.purchases||0)/100}});
     // quarters (fiscal Q1 Mar-May...)
     var q={Q1:0,Q2:0,Q3:0,Q4:0};(sum.series||[]).forEach(function(s){var mo=Number(s.key.slice(5,7));var qq=(mo>=3&&mo<=5)?"Q1":(mo>=6&&mo<=8)?"Q2":(mo>=9&&mo<=11)?"Q3":"Q4";q[qq]+=s.purchases});
-    var h='<div class="cards kpis">'+kpi("FY purchases to date",R(t.purchases),null)+kpi("Returns",R(t.returns),null)+kpi("PO count",num(t.po_count),null)+kpi("Monthly target",R0(monthlyTarget*100),"Monthly pace")+'</div>';
+    var fyNet=(t.purchases||0)-(t.returns||0);
+    var h='<div class="cards kpis">'+kpi("Total purchase orders",R(fyNet),"net \\u00b7 gross "+R(t.purchases))+kpi("Returns",R(t.returns),null)+kpi("PO count",num(t.po_count),null)+kpi("Monthly target",R0(monthlyTarget*100),"Monthly pace")+'</div>';
     h+='<div class="card"><h2>Month-by-month vs target</h2>'+colChart(series,{budget:monthlyTarget})+'</div>';
     h+='<div class="card" style="margin-top:14px"><h2>Quarter breakdown</h2><div class="cards g2">'+["Q1","Q2","Q3","Q4"].map(function(k){return kpi(k+" (Mar-Feb FY)",R(q[k]),null)}).join("")+'</div></div>';
     h+=grFimSection(gr,fim);
