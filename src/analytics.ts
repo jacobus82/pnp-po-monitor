@@ -68,7 +68,8 @@ function fimResolvedCte(open: "WITH" | ",") {
                         CASE f.report_type WHEN 'daily' THEN 0 WHEN 'weekly' THEN 1 ELSE 2 END ASC
              ) AS rn
       FROM _days JOIN fim_daily f
-        ON f.dept_code != 'TOTAL' AND f.date_from <= _days.d AND f.date_to >= _days.d
+        ON f.dept_code != 'TOTAL' AND f.report_type != 'weekly_freshb'
+           AND f.date_from <= _days.d AND f.date_to >= _days.d
     ),
     fr AS (
       SELECT day, dept_code, dept_name, report_type,
@@ -885,6 +886,79 @@ export async function getFreshBConfig(
   return { depts, stocktakeDay, fimUploadDay, marginDate };
 }
 
+export interface FreshBMargin {
+  salesZar: number;
+  cosZar: number;
+  marginPct: number | null;
+}
+
+/**
+ * Fresh B margin/COS from the dedicated `weekly_freshb` FIM export — the EXCLUSIVE
+ * source of Fresh B margin. The general weekly/daily FIM carry the wrong post-
+ * stocktake cost, so they are NEVER used for Fresh B margin. Sums the weekly_freshb
+ * rows overlapping [from,to] per Fresh B dept. A dept with NO weekly_freshb row for
+ * the window is absent from the map → the caller must treat it as PENDING (never
+ * fall back to daily/general-weekly). `integrity` flags depts whose file weekly
+ * sales diverge >2% from the daily FIM sum for the same range (daily stays
+ * authoritative for daily/quantity views).
+ */
+export async function freshBWeeklyMargin(
+  env: Env,
+  from: string,
+  to: string,
+): Promise<{
+  byDept: Map<string, FreshBMargin>;
+  integrity: { deptCode: string; fileSales: number; dailySales: number; deltaPct: number }[];
+}> {
+  const rows = await env.DB.prepare(
+    `SELECT dept_code,
+            COALESCE(SUM(net_sales_zar),0) AS sales,
+            COALESCE(SUM(total_cos_zar),0)  AS cos
+       FROM fim_daily
+      WHERE report_type = 'weekly_freshb' AND dept_code != 'TOTAL'
+        AND date_from <= ? AND date_to >= ?
+      GROUP BY dept_code`,
+  )
+    .bind(to, from)
+    .all<{ dept_code: string; sales: number; cos: number }>();
+  const byDept = new Map<string, FreshBMargin>();
+  for (const r of rows.results ?? []) {
+    const sales = Number(r.sales);
+    const cos = Number(r.cos);
+    byDept.set(r.dept_code, {
+      salesZar: Math.round(sales * 100) / 100,
+      cosZar: Math.round(cos * 100) / 100,
+      marginPct: sales > 0 ? Math.round(((sales - cos) / sales) * 1000) / 10 : null,
+    });
+  }
+  const integrity: { deptCode: string; fileSales: number; dailySales: number; deltaPct: number }[] = [];
+  if (byDept.size) {
+    const codes = [...byDept.keys()];
+    const ph = codes.map(() => "?").join(",");
+    const daily = await env.DB.prepare(
+      `SELECT dept_code, COALESCE(SUM(net_sales_zar),0) AS sales FROM fim_daily
+        WHERE report_type = 'daily' AND dept_code IN (${ph})
+          AND date_from >= ? AND date_to <= ? GROUP BY dept_code`,
+    )
+      .bind(...codes, from, to)
+      .all<{ dept_code: string; sales: number }>();
+    const dmap = new Map((daily.results ?? []).map((d) => [d.dept_code, Number(d.sales)]));
+    for (const [dept, v] of byDept) {
+      const ds = dmap.get(dept) ?? 0;
+      const delta = ds > 0 ? Math.abs(v.salesZar - ds) / ds : v.salesZar > 0 ? 1 : 0;
+      if (delta > 0.02) {
+        integrity.push({
+          deptCode: dept,
+          fileSales: v.salesZar,
+          dailySales: Math.round(ds * 100) / 100,
+          deltaPct: Math.round(delta * 1000) / 10,
+        });
+      }
+    }
+  }
+  return { byDept, integrity };
+}
+
 /**
  * GET /api/fim/period?from=&to= — FIM aggregated over a date range, GROUP BY
  * dept. CRITICAL: margin% is computed from SUMMED sales/cos, never by averaging
@@ -910,7 +984,7 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
 
   // The aggregate `rows` depends on the clamped bounds above, but the guideline
   // lookup and the Fresh-B config are independent of that chain — overlap all three.
-  const [rows, guides, fb] = await Promise.all([
+  const [rows, guides, fb, fbm] = await Promise.all([
     env.DB.prepare(
       `${fimResolvedCte("WITH")}
      SELECT dept_code,
@@ -939,6 +1013,7 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
      WHERE effective_from = (SELECT MAX(effective_from) FROM dept_guidelines g2 WHERE g2.dept_code = g.dept_code)`,
     ).all<{ dept_code: string; dept_name: string; dept_group: string; guideline_margin_pct: number }>(),
     getFreshBConfig(env),
+    freshBWeeklyMargin(env, from, to),
   ]);
   const gmap = new Map((guides.results ?? []).map((g) => [g.dept_code, g]));
 
@@ -979,20 +1054,28 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
       reportTypes: r.report_types,
       isProduction: deptCode === "F06" || deptCode === "F09",
       marginSuppressed: false,
+      marginPending: false,
     };
   });
 
-  // Fresh-B margin suppression: daily/in-progress margin is unreliable until the
-  // week is stocktaken. If the window extends past the last loaded stocktake,
-  // null out margin (and variance) for Fresh-B depts — sales/waste stay intact.
-  // (fb fetched concurrently with rows/guides above.)
-  if (to > fb.marginDate) {
-    for (const d of departments) {
-      if (fb.depts.has(d.deptCode)) {
-        d.marginPct = null;
-        d.variancePp = null;
-        d.marginSuppressed = true;
-      }
+  // Fresh B margin comes EXCLUSIVELY from the dedicated weekly_freshb export (the
+  // general/daily FIM carry the wrong post-stocktake cost). For each Fresh B dept,
+  // override sales+cos+margin from that file so GP% equals the file EXACTLY. A dept
+  // with no weekly_freshb row for this window is PENDING (margin null) — never a
+  // daily/general-weekly number. Sales/waste for daily views come from daily rows in
+  // the day-by-day endpoints, not here.
+  for (const d of departments) {
+    if (!fb.depts.has(d.deptCode)) continue;
+    const m = fbm.byDept.get(d.deptCode);
+    if (m && m.marginPct != null) {
+      d.salesZar = m.salesZar;
+      d.cosZar = m.cosZar;
+      d.marginPct = m.marginPct;
+      d.variancePp = d.guidelineMarginPct != null ? Math.round((m.marginPct - d.guidelineMarginPct) * 10) / 10 : null;
+    } else {
+      d.marginPct = null;
+      d.variancePp = null;
+      d.marginPending = true; // no weekly_freshb file loaded for this week yet
     }
   }
 
@@ -1001,7 +1084,7 @@ export async function handleFimPeriod(req: Request, env: Env): Promise<Response>
       (GROUP_RANK[a.deptGroup ?? ""] ?? 9) - (GROUP_RANK[b.deptGroup ?? ""] ?? 9) ||
       a.deptCode.localeCompare(b.deptCode),
   );
-  return json({ from, to, departments, freshBMarginDate: fb.marginDate });
+  return json({ from, to, departments, freshBMarginDate: fb.marginDate, freshBIntegrity: fbm.integrity });
 }
 
 const GROUP_RANK: Record<string, number> = { "Non-Fresh": 0, "Fresh-A": 1, "Fresh-B": 2 };
@@ -1698,13 +1781,13 @@ async function prevCompleteFimWeek(
   // Latest FIM day ending strictly before the current week; fall back to the
   // overall latest FIM day if everything we have is inside the current week.
   let anchorRow = await env.DB.prepare(
-    `SELECT MAX(date_to) d FROM fim_daily WHERE dept_code != 'TOTAL' AND date_to < ?`,
+    `SELECT MAX(date_to) d FROM fim_daily WHERE dept_code != 'TOTAL' AND report_type != 'weekly_freshb' AND date_to < ?`,
   )
     .bind(curStart)
     .first<{ d: string | null }>();
   if (!anchorRow?.d) {
     anchorRow = await env.DB.prepare(
-      `SELECT MAX(date_to) d FROM fim_daily WHERE dept_code != 'TOTAL'`,
+      `SELECT MAX(date_to) d FROM fim_daily WHERE dept_code != 'TOTAL' AND report_type != 'weekly_freshb'`,
     ).first<{ d: string | null }>();
   }
   const anchor = anchorRow?.d ?? null;
@@ -2127,7 +2210,7 @@ export async function handleWaste(req: Request, env: Env): Promise<Response> {
       `SELECT fiscal_week_start ws, fiscal_week_end we,
                 COALESCE(SUM(shrink_zar),0) shrink, COALESCE(SUM(waste_zar),0) waste,
                 COALESCE(SUM(net_sales_zar),0) sales
-         FROM fim_daily WHERE dept_code != 'TOTAL'
+         FROM fim_daily WHERE dept_code != 'TOTAL' AND report_type != 'weekly_freshb'
          GROUP BY fiscal_week_start, fiscal_week_end
          ORDER BY fiscal_week_end DESC LIMIT 13`,
     ).all<{ ws: string; we: string; shrink: number; waste: number; sales: number }>(),
@@ -3159,7 +3242,7 @@ export async function handleBudgetsSuggest(req: Request, env: Env): Promise<Resp
                     COALESCE(SUM(total_cos_zar * (julianday(min(date_to, ?2)) - julianday(max(date_from, ?1)) + 1)
                                  / (julianday(date_to) - julianday(date_from) + 1)),0) c
              FROM fim_daily
-             WHERE dept_code != 'TOTAL' AND date_from <= ?2 AND date_to >= ?1
+             WHERE dept_code != 'TOTAL' AND report_type != 'weekly_freshb' AND date_from <= ?2 AND date_to >= ?1
              GROUP BY dept_code`,
           ).bind(base.week_start, base.week_end).all<{ dept_code: string; s: number; c: number }>()
         ).results ?? [];

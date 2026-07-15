@@ -663,10 +663,22 @@ export async function cpToDeptMap(env: Env): Promise<Map<string, { deptCode: str
   return map;
 }
 
-/** Does FIM data already exist for this exact period? (period-level dedup). */
-export async function fimPeriodExists(env: Env, dateFrom: string, dateTo: string): Promise<boolean> {
+/**
+ * Does FIM data already exist for this period? Dedup is keyed by (range, is-freshb):
+ * a 'weekly_freshb' upload only dedups against existing weekly_freshb rows, and a
+ * general (daily/weekly/monthly) upload only against non-freshb rows — so a Fresh B
+ * weekly file and a general weekly for the same week never block each other.
+ */
+export async function fimPeriodExists(
+  env: Env,
+  dateFrom: string,
+  dateTo: string,
+  reportType?: string,
+): Promise<boolean> {
+  const freshb = reportType === "weekly_freshb";
   const row = await env.DB.prepare(
-    `SELECT 1 FROM fim_daily WHERE date_from = ? AND date_to = ? LIMIT 1`,
+    `SELECT 1 FROM fim_daily WHERE date_from = ? AND date_to = ?
+       AND report_type ${freshb ? "=" : "!="} 'weekly_freshb' LIMIT 1`,
   )
     .bind(dateFrom, dateTo)
     .first();
@@ -708,7 +720,7 @@ export async function insertFimRows(
         trade_invest_zar, sallies_tallies_zar, swell_allowance_zar,
         total_shortages_zar, net_shrinkage_zar, rtc_zar
      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-     ON CONFLICT(date_from, date_to, dept_code) DO UPDATE SET
+     ON CONFLICT(date_from, date_to, dept_code, report_type) DO UPDATE SET
         report_date=excluded.report_date, report_type=excluded.report_type,
         fiscal_year=excluded.fiscal_year, fiscal_quarter=excluded.fiscal_quarter,
         fiscal_week=excluded.fiscal_week, fiscal_week_start=excluded.fiscal_week_start,

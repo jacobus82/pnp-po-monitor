@@ -2371,7 +2371,7 @@ function openSettlementLiv(liv){openModal("LIV "+esc(liv),'<div class="loading">
 }
 
 // ---- Data Coverage grid (#coverage): /api/feed-coverage (Brief 7 §1) ----
-function covDot(cell){var c=cell.status==="green"?"#2E7D32":cell.status==="amber"?"#d97706":"#BE1D37";return '<span title="'+esc(cell.detail)+'" style="display:inline-block;width:22px;height:22px;border-radius:5px;background:'+c+';color:#fff;font-size:9px;line-height:22px;text-align:center;cursor:default">'+(cell.status==="green"?"":cell.status==="amber"?"~":"\\u2717")+'</span>'}
+function covDot(cell){if(!cell)cell={status:"",detail:""};var c=cell.status==="green"?"#2E7D32":cell.status==="amber"?"#d97706":cell.status==="grey"?"#9aa4ae":"#BE1D37";return '<span title="'+esc(cell.detail)+'" style="display:inline-block;width:22px;height:22px;border-radius:5px;background:'+c+';color:#fff;font-size:9px;line-height:22px;text-align:center;cursor:default">'+(cell.status==="green"?"":cell.status==="amber"?"~":cell.status==="grey"?"\\u00b7":"\\u2717")+'</span>'}
 PAGES.coverage=function(){loading();api("/api/feed-coverage?weeks=16").then(function(d){
   var feeds=d.feeds||[],weeks=d.weeks||[];
   // Latest-loaded staleness summary line at the top.
@@ -2525,8 +2525,8 @@ function briefLoad(){
     var weeks=(per.weeks||[]);
     var sel='<select class="sel" id="brWeek" onchange="window._briefWeek=this.value;briefLoad()">'+weeks.map(function(x){var c=x.label.split(" ")[0];return '<option value="'+esc(c)+'"'+(c===w.code?" selected":"")+'>'+esc(x.label)+'</option>'}).join("")+'</select>';
     // Coverage chips for the week.
-    var feeds=[["po","PO"],["gr","GR"],["eod","EOD"],["fim","FIM"],["statement","Stmt"],["cc","Cust"],["fanScore","Fan"]];
-    var chips=feeds.map(function(f){var c=cov[f[0]]||{};var col=c.status==="green"?"var(--green)":c.status==="amber"?"var(--amber)":"var(--red)";return '<span class="tag" style="border-color:'+col+';color:'+col+'" title="'+esc(c.detail||"")+'">'+f[1]+'</span>'}).join(" ");
+    var feeds=[["po","PO"],["gr","GR"],["eod","EOD"],["fim","FIM"],["freshbw","FreshB"],["statement","Stmt"],["cc","Cust"],["fanScore","Fan"]];
+    var chips=feeds.map(function(f){var c=cov[f[0]]||{};var col=c.status==="green"?"var(--green)":c.status==="amber"?"var(--amber)":c.status==="grey"?"var(--muted)":"var(--red)";return '<span class="tag" style="border-color:'+col+';color:'+col+'" title="'+esc(c.detail||"")+'">'+f[1]+'</span>'}).join(" ");
     var h='<div class="toolbar noprint" style="gap:10px;flex-wrap:wrap"><label class="small muted">Week '+sel+'</label>'
       +'<label class="small muted">Required margin % <input class="inp" id="brMargin" type="number" step="0.1" value="'+(d.params.requiredMarginPct)+'" style="width:80px" onchange="window._briefMargin=this.value;briefLoad()"></label>'
       +'<button class="btn" onclick="window.print()">\\uD83D\\uDDA8 Print</button></div>';

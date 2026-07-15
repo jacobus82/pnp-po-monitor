@@ -8,7 +8,7 @@
 import { type Env } from "./config";
 import { computePaymentsDue } from "./statements-analytics";
 import { weekCoverage } from "./coverage";
-import { gpBridge as deptGpBridge } from "./dept";
+import { gpBridge as deptGpBridge, freshBAdjuster } from "./dept";
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
@@ -30,7 +30,7 @@ async function fimByDept(env: Env, from: string, to: string) {
                ROW_NUMBER() OVER (PARTITION BY _days.d, f.dept_code
                  ORDER BY (julianday(f.date_to)-julianday(f.date_from)) ASC,
                           CASE f.report_type WHEN 'daily' THEN 0 WHEN 'weekly' THEN 1 ELSE 2 END) rn
-        FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.date_from<=_days.d AND f.date_to>=_days.d)
+        FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.report_type!='weekly_freshb' AND f.date_from<=_days.d AND f.date_to>=_days.d)
      SELECT dept_code, MAX(nm) dept_name, ROUND(SUM(ns/span)) sales, ROUND(SUM(cos/span)) cos,
             ROUND(SUM(wst/span)) waste, ROUND(SUM(shr/span)) shrink
      FROM _c WHERE rn=1 GROUP BY dept_code`,
@@ -55,7 +55,7 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   const ly = await env.DB.prepare(`SELECT fiscal_week_code, week_start, week_end FROM fiscal_weeks WHERE fiscal_year=? AND week_no=?`).bind(target.fiscal_year - 1, target.week_no).first<{ fiscal_week_code: string; week_start: string; week_end: string }>();
 
   // Fetch the independent pieces concurrently.
-  const [coverage, fim, lyFim, budgetRows, payments, vencorRes, claimsRow, uninvRow, returnsRow, fanRow, interestRow, anomRow, posRow, trendRes] = await Promise.all([
+  const [coverage, fim, lyFim, budgetRows, payments, vencorRes, claimsRow, uninvRow, returnsRow, fanRow, interestRow, anomRow, posRow, trendRes, fbAdj] = await Promise.all([
     weekCoverage(env, code, ws, we),
     fimByDept(env, ws, we),
     ly ? fimByDept(env, ly.week_start, ly.week_end) : Promise.resolve([]),
@@ -97,11 +97,12 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
         _c AS (SELECT _days.d day, f.dept_code dc, (julianday(f.date_to)-julianday(f.date_from)+1) span,
                  f.net_sales_zar ns, f.waste_zar wst,
                  ROW_NUMBER() OVER (PARTITION BY _days.d, f.dept_code ORDER BY (julianday(f.date_to)-julianday(f.date_from)) ASC, CASE f.report_type WHEN 'daily' THEN 0 WHEN 'weekly' THEN 1 ELSE 2 END) rn
-               FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.date_from<=_days.d AND f.date_to>=_days.d)
+               FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.report_type!='weekly_freshb' AND f.date_from<=_days.d AND f.date_to>=_days.d)
        SELECT fw.fiscal_week_code wk, _c.dc dept, ROUND(SUM(_c.wst/span)) waste, ROUND(SUM(_c.ns/span)) sales
        FROM _c JOIN fiscal_weeks fw ON _c.day>=fw.week_start AND _c.day<=fw.week_end
        WHERE _c.rn=1 GROUP BY fw.fiscal_week_code, _c.dc`,
     ).bind(ws, we).all<{ wk: string; dept: string; waste: number; sales: number }>(),
+    freshBAdjuster(env, ws, we),
   ]);
 
   const fimComplete = coverage.fim!.status === "green";
@@ -111,26 +112,41 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
   const savedDept = new Map((budgetRows.results ?? []).filter((b) => b.budget_type === "department").map((b) => [b.department, b.sales_budget_zar]));
   const budgetSource = savedStore ? "saved" : "LY-FIM-generated";
   const lyByDept = new Map(lyFim.map((d) => [d.dept_code, d.sales]));
-  const tradingDepts = fim.map((d) => {
+  // Fresh B: sales/cos from the weekly_freshb file (GP = file exactly) or pending.
+  const adjusted = fim.map((d) => {
+    const a = fbAdj(d.dept_code, d.sales, d.cos);
+    return { ...d, sales: a.sales, cos: a.cos, pending: a.pending };
+  });
+  const tradingDepts = adjusted.map((d) => {
     const saved = savedDept.get(d.dept_code);
     const lySales = lyByDept.get(d.dept_code) ?? 0;
     const budget = saved != null ? saved : r0(lySales * (1 + growthPct / 100));
     return {
       dept: d.dept_code, name: d.dept_name, sales: d.sales, budget,
       varianceZar: r0(d.sales - budget), variancePct: pct(d.sales - budget, budget),
-      gpPct: pct(d.sales - d.cos, d.sales), lySales, lyVarPct: pct(d.sales - lySales, lySales),
+      gpPct: d.pending ? null : pct(d.sales - d.cos, d.sales), lySales, lyVarPct: pct(d.sales - lySales, lySales),
+      marginPending: d.pending,
     };
   }).sort((a, b) => b.sales - a.sales);
-  const storeSales = fim.reduce((s, d) => s + d.sales, 0);
-  const storeCos = fim.reduce((s, d) => s + d.cos, 0);
+  // Quantities (sales / waste / shrink) are ALL depts (daily). GP margin/bridge use
+  // only depts with a known margin — pending Fresh B (no weekly_freshb file) drops
+  // out of GP so the store margin isn't computed from the wrong daily cost.
+  const known = adjusted.filter((d) => !d.pending);
+  const freshBPending = adjusted.filter((d) => d.pending).map((d) => d.dept_code);
+  const storeSales = adjusted.reduce((s, d) => s + d.sales, 0);
+  const storeWaste = adjusted.reduce((s, d) => s + d.waste, 0);
+  const storeShrink = adjusted.reduce((s, d) => s + d.shrink, 0);
+  const knownSales = known.reduce((s, d) => s + d.sales, 0);
+  const knownCos = known.reduce((s, d) => s + d.cos, 0);
+  const knownWaste = known.reduce((s, d) => s + d.waste, 0);
+  const knownShrink = known.reduce((s, d) => s + d.shrink, 0);
+  const knownBudget = adjusted.reduce((s, d) => (d.pending ? s : s + (savedDept.get(d.dept_code) ?? r0((lyByDept.get(d.dept_code) ?? 0) * (1 + growthPct / 100)))), 0);
   const storeBudget = savedStore?.sales_budget_zar != null ? savedStore.sales_budget_zar : tradingDepts.reduce((s, d) => s + d.budget, 0);
   const storeLy = lyFim.reduce((s, d) => s + d.sales, 0);
-  const storeWaste = fim.reduce((s, d) => s + d.waste, 0);
-  const storeShrink = fim.reduce((s, d) => s + d.shrink, 0);
 
   // ---- GP bridge (shared 5-component model: volume / margin rate / −waste /
   // −shrink / residual) so the Brief, #gpbridge and dossier all agree. ----
-  const gpBridge = deptGpBridge(storeSales, storeCos, storeWaste, storeShrink, storeBudget, requiredMarginPct);
+  const gpBridge = deptGpBridge(knownSales, knownCos, knownWaste, knownShrink, knownBudget, requiredMarginPct);
 
   // ---- Loss ---- (storeWaste/storeShrink computed above for the GP bridge)
   const lossDepts = fim.map((d) => ({
@@ -175,8 +191,8 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
       complete: fimComplete, budgetSource,
       store: {
         sales: r0(storeSales), budget: r0(storeBudget), varianceZar: r0(storeSales - storeBudget), variancePct: pct(storeSales - storeBudget, storeBudget),
-        gpPct: pct(storeSales - storeCos, storeSales), requiredMarginPct, gpDeltaPp: pct(storeSales - storeCos, storeSales) != null ? Math.round((pct(storeSales - storeCos, storeSales)! - requiredMarginPct) * 10) / 10 : null,
-        lySales: r0(storeLy), lyVarPct: pct(storeSales - storeLy, storeLy),
+        gpPct: pct(knownSales - knownCos, knownSales), requiredMarginPct, gpDeltaPp: pct(knownSales - knownCos, knownSales) != null ? Math.round((pct(knownSales - knownCos, knownSales)! - requiredMarginPct) * 10) / 10 : null,
+        lySales: r0(storeLy), lyVarPct: pct(storeSales - storeLy, storeLy), freshBPending,
       },
       depts: tradingDepts,
     },

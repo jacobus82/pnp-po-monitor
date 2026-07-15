@@ -22,6 +22,7 @@ export const FEEDS = [
   { key: "gr", label: "GR (BI)", kind: "daily" },
   { key: "eod", label: "EOD movements", kind: "daily" },
   { key: "fim", label: "FIM", kind: "fim" },
+  { key: "freshbw", label: "Fresh B weekly FIM", kind: "freshbw" },
   { key: "statement", label: "Statement", kind: "binary" },
   { key: "cc", label: "Customer count", kind: "daily" },
   { key: "fanScore", label: "Fan Score", kind: "binary" },
@@ -29,7 +30,7 @@ export const FEEDS = [
 
 interface WeekRow {
   wk: string; ws: string; we: string;
-  po: number; gr: number; eod: number; fimd: number; fimw: number; stmt: number; cc: number; fs: number;
+  po: number; gr: number; eod: number; fimd: number; fimw: number; fbw: number; stmt: number; cc: number; fs: number;
 }
 
 // A daily feed is green at ≥6 of 7 days, amber at 1–5, red at 0.
@@ -49,6 +50,17 @@ function fimStatus(fimd: number, fimw: number): { status: string; detail: string
   if (fimd >= 1) return { status: "amber", detail: fimd + "/7 daily" };
   return { status: "red", detail: "missing" };
 }
+// Fresh B weekly FIM: the dedicated post-stocktake export, expected each Tuesday for
+// the prior Mon–Sun week (weekEnd = Sunday). Green once loaded; before it's due
+// (through Tuesday, ≤2 days after week end) it is "awaited"; amber on Wednesday,
+// red from Thursday on if still missing.
+function freshbwStatus(present: number, weekEnd: string, today: string): { status: string; detail: string } {
+  if (present > 0) return { status: "green", detail: "loaded" };
+  const days = Math.round((Date.parse(today + "T00:00:00Z") - Date.parse(weekEnd + "T00:00:00Z")) / 86_400_000);
+  if (days < 3) return { status: "grey", detail: "due Tue" };
+  if (days === 3) return { status: "amber", detail: "overdue (Wed)" };
+  return { status: "red", detail: "missing" };
+}
 
 /**
  * Feed status for a SINGLE fiscal week (reused by the Weekly Operating Brief to
@@ -64,14 +76,17 @@ export async function weekCoverage(
        (SELECT COUNT(DISTINCT mvmt_date) FROM eod_movements WHERE mvmt_date BETWEEN ?2 AND ?3) eod,
        (SELECT COUNT(DISTINCT date_from) FROM fim_daily WHERE report_type='daily' AND date_from BETWEEN ?2 AND ?3) fimd,
        (SELECT COUNT(*) FROM fim_daily WHERE report_type='weekly' AND date_from<=?3 AND date_to>=?2) fimw,
+       (SELECT COUNT(*) FROM fim_daily WHERE report_type='weekly_freshb' AND date_from<=?3 AND date_to>=?2) fbw,
        (SELECT COUNT(*) FROM statements WHERE statement_no=?1) stmt,
        (SELECT COUNT(DISTINCT cal_date) FROM customer_counts WHERE cal_date BETWEEN ?2 AND ?3) cc,
-       (SELECT COUNT(*) FROM fan_score_weeks WHERE week_ending BETWEEN ?2 AND ?3) fs`,
-  ).bind(weekCode, weekStart, weekEnd).first<{ po: number; gr: number; eod: number; fimd: number; fimw: number; stmt: number; cc: number; fs: number }>();
-  const z = r ?? { po: 0, gr: 0, eod: 0, fimd: 0, fimw: 0, stmt: 0, cc: 0, fs: 0 };
+       (SELECT COUNT(*) FROM fan_score_weeks WHERE week_ending BETWEEN ?2 AND ?3) fs,
+       date('now') today`,
+  ).bind(weekCode, weekStart, weekEnd).first<{ po: number; gr: number; eod: number; fimd: number; fimw: number; fbw: number; stmt: number; cc: number; fs: number; today: string }>();
+  const z = r ?? { po: 0, gr: 0, eod: 0, fimd: 0, fimw: 0, fbw: 0, stmt: 0, cc: 0, fs: 0, today: "" };
   return {
     po: dailyStatus(z.po), gr: dailyStatus(z.gr), eod: dailyStatus(z.eod),
-    fim: fimStatus(z.fimd, z.fimw), statement: binaryStatus(z.stmt, weekCode),
+    fim: fimStatus(z.fimd, z.fimw), freshbw: freshbwStatus(z.fbw, weekEnd, z.today),
+    statement: binaryStatus(z.stmt, weekCode),
     cc: dailyStatus(z.cc), fanScore: binaryStatus(z.fs, "loaded"),
   };
 }
@@ -92,6 +107,7 @@ export async function handleFeedCoverage(req: Request, env: Env): Promise<Respon
       (SELECT COUNT(DISTINCT mvmt_date) FROM eod_movements WHERE mvmt_date BETWEEN fw.week_start AND fw.week_end) eod,
       (SELECT COUNT(DISTINCT date_from) FROM fim_daily WHERE report_type='daily' AND date_from BETWEEN fw.week_start AND fw.week_end) fimd,
       (SELECT COUNT(*) FROM fim_daily WHERE report_type='weekly' AND date_from<=fw.week_end AND date_to>=fw.week_start) fimw,
+      (SELECT COUNT(*) FROM fim_daily WHERE report_type='weekly_freshb' AND date_from<=fw.week_end AND date_to>=fw.week_start) fbw,
       (SELECT COUNT(*) FROM statements WHERE statement_no=fw.fiscal_week_code) stmt,
       (SELECT COUNT(DISTINCT cal_date) FROM customer_counts WHERE cal_date BETWEEN fw.week_start AND fw.week_end) cc,
       (SELECT COUNT(*) FROM fan_score_weeks WHERE week_ending BETWEEN fw.week_start AND fw.week_end) fs
@@ -104,11 +120,15 @@ export async function handleFeedCoverage(req: Request, env: Env): Promise<Respon
     const cells: Record<string, { status: string; detail: string }> = {
       po: dailyStatus(r.po), gr: dailyStatus(r.gr), eod: dailyStatus(r.eod),
       fim: fimStatus(r.fimd, r.fimw),
+      freshbw: freshbwStatus(r.fbw, r.we, today),
       statement: binaryStatus(r.stmt, r.wk),
       cc: dailyStatus(r.cc),
       fanScore: binaryStatus(r.fs, "loaded"),
     };
-    const complete = FEEDS.every((f) => cells[f.key]!.status === "green");
+    // "Complete" excludes the freshbw feed (a going-forward source): a week that
+    // predates the Fresh B weekly workflow shouldn't read as incomplete forever. The
+    // freshbw column + staleness list still surface when it's actually missing.
+    const complete = FEEDS.filter((f) => f.key !== "freshbw").every((f) => cells[f.key]!.status === "green");
     return { code: r.wk, weekStart: r.ws, weekEnd: r.we, cells, complete };
   });
 
@@ -128,7 +148,10 @@ export async function handleFeedCoverage(req: Request, env: Env): Promise<Respon
   const closed = weeks.filter((w) => w.weekEnd < today); // weeks fully in the past
   const missingByFeed: Record<string, string[]> = {};
   for (const f of FEEDS) {
-    missingByFeed[f.key] = closed.filter((w) => w.cells[f.key]!.status !== "green").map((w) => w.code);
+    // "grey" = not yet due (freshbw before its Tuesday) — not actionable-missing.
+    missingByFeed[f.key] = closed
+      .filter((w) => w.cells[f.key]!.status !== "green" && w.cells[f.key]!.status !== "grey")
+      .map((w) => w.code);
   }
 
   return json({

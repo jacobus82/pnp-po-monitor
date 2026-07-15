@@ -6,6 +6,28 @@
 import { type Env } from "./config";
 import { DEPARTMENTS, resolveDeptName } from "./departments";
 import { budgetAssumptions } from "./otb";
+import { getFreshBConfig, freshBWeeklyMargin } from "./analytics";
+
+/**
+ * Builds a per-dept Fresh B margin adjuster over [from,to]. For a Fresh B dept it
+ * returns the dedicated weekly_freshb file's sales+cos (so GP% equals the file
+ * EXACTLY); if no file covers the window it returns pending=true (Fresh B margin is
+ * NOT derivable from daily/general-weekly per the house rule). Non-Fresh-B depts
+ * pass through unchanged.
+ */
+export async function freshBAdjuster(
+  env: Env,
+  from: string,
+  to: string,
+): Promise<(deptCode: string, sales: number, cos: number) => { sales: number; cos: number; pending: boolean }> {
+  const [cfg, fbm] = await Promise.all([getFreshBConfig(env), freshBWeeklyMargin(env, from, to)]);
+  return (deptCode, sales, cos) => {
+    if (!cfg.depts.has(deptCode)) return { sales, cos, pending: false };
+    const m = fbm.byDept.get(deptCode);
+    if (m && m.marginPct != null) return { sales: m.salesZar, cos: m.cosZar, pending: false };
+    return { sales, cos, pending: true };
+  };
+}
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8" } });
@@ -38,7 +60,7 @@ async function fimByDept(env: Env, from: string, to: string): Promise<FimDeptRow
                (julianday(f.date_to)-julianday(f.date_from)+1) span,
                f.net_sales_zar ns, f.total_cos_zar cos, f.waste_zar wst, f.shrink_zar shr,
                ROW_NUMBER() OVER (PARTITION BY _days.d, f.dept_code ORDER BY (julianday(f.date_to)-julianday(f.date_from)) ASC, CASE f.report_type WHEN 'daily' THEN 0 WHEN 'weekly' THEN 1 ELSE 2 END) rn
-             FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.date_from<=_days.d AND f.date_to>=_days.d)
+             FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.report_type!='weekly_freshb' AND f.date_from<=_days.d AND f.date_to>=_days.d)
      SELECT dept_code, MAX(nm) dept_name, ROUND(SUM(ns/span)) sales, ROUND(SUM(cos/span)) cos,
             ROUND(SUM(wst/span)) waste, ROUND(SUM(shr/span)) shrink
      FROM _c WHERE rn=1 GROUP BY dept_code`,
@@ -83,22 +105,30 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
   const from = q.get("from"), to = q.get("to");
   if (!from || !to) return json({ error: "from and to are required." }, 400);
 
-  const [fim, lyFim, gr, swell, budget, names] = await Promise.all([
+  const [fim, lyFim, gr, swell, budget, names, adj] = await Promise.all([
     fimByDept(env, from, to),
     fimByDept(env, lyShift(from), lyShift(to)),
     grByDept(env, from, to),
     swellByDept(env, from, to),
     budgetByDept(env, from, to),
     deptNameMap(env),
+    freshBAdjuster(env, from, to),
   ]);
   const lyByDept = new Map(lyFim.map((d) => [d.dept_code, d]));
-  const storeSales = fim.reduce((s, d) => s + d.sales, 0);
-  const storeGp = fim.reduce((s, d) => s + (d.sales - d.cos), 0);
+  // Fresh B depts: sales/cos come from the weekly_freshb file (GP% = file exactly) or
+  // are PENDING when no file covers the window — never a daily/general-weekly margin.
+  const adjusted = fim.map((d) => {
+    const a = adj(d.dept_code, d.sales, d.cos);
+    return { ...d, sales: a.sales, cos: a.cos, pending: a.pending };
+  });
+  const storeSales = adjusted.reduce((s, d) => s + d.sales, 0);
+  const storeGp = adjusted.reduce((s, d) => (d.pending ? s : s + (d.sales - d.cos)), 0);
 
-  const rows = fim.filter((d) => d.sales !== 0 || (gr.get(d.dept_code) ?? 0) !== 0).map((d) => {
-    const gp = d.sales - d.cos;
+  const rows = adjusted.filter((d) => d.sales !== 0 || (gr.get(d.dept_code) ?? 0) !== 0).map((d) => {
+    const gp = d.pending ? null : d.sales - d.cos;
     const ly = lyByDept.get(d.dept_code);
-    const lyGp = ly ? ly.sales - ly.cos : 0;
+    const lyA = ly ? adj(d.dept_code, ly.sales, ly.cos) : null;
+    const lyGp = lyA && !lyA.pending ? lyA.sales - lyA.cos : null;
     const grCost = r0(gr.get(d.dept_code) ?? 0);
     const swellR = r0(Math.abs(swell.get(d.dept_code) ?? 0)); // funding received (magnitude)
     const bud = budget.get(d.dept_code) ?? null;
@@ -106,7 +136,8 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
       dept: d.dept_code, name: nameOf(names, d.dept_code, d.dept_name),
       sales: r0(d.sales), sharePct: pct(d.sales, storeSales),
       lySales: r0(ly?.sales ?? 0), growthPct: ly && ly.sales > 0 ? pct(d.sales - ly.sales, ly.sales) : null,
-      gpPct: pct(gp, d.sales), gpR: r0(gp), gpSharePct: pct(gp, storeGp),
+      gpPct: gp == null ? null : pct(gp, d.sales), gpR: gp == null ? null : r0(gp),
+      gpSharePct: gp == null ? null : pct(gp, storeGp),
       wastePct: pct(d.waste, d.sales), shrinkPct: pct(d.shrink, d.sales),
       overWaste: (pct(d.waste, d.sales) ?? 0) > WASTE_THRESHOLD, overShrink: (pct(d.shrink, d.sales) ?? 0) > WASTE_THRESHOLD,
       grPurchases: grCost, purchToSales: d.sales > 0 ? Math.round((grCost / d.sales) * 100) / 100 : null,
@@ -114,10 +145,11 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
       swell: swellR, swellPctOfPurch: pct(swellR, grCost),
       budget: bud != null ? r0(bud) : null, budgetVarPct: bud && bud > 0 ? pct(d.sales - bud, bud) : null,
       // Default sort key: GP contribution variance vs LY (biggest GP loss first).
-      gpVarVsLy: r0(gp - lyGp), lyGpPct: ly ? pct(lyGp, ly.sales) : null,
+      gpVarVsLy: gp == null || lyGp == null ? null : r0(gp - lyGp), lyGpPct: lyGp == null || !ly ? null : pct(lyGp, ly.sales),
+      marginPending: d.pending,
     };
   });
-  rows.sort((a, b) => a.gpVarVsLy - b.gpVarVsLy);
+  rows.sort((a, b) => (a.gpVarVsLy ?? Infinity) - (b.gpVarVsLy ?? Infinity));
 
   const byGrowth = rows.filter((r) => r.growthPct != null).slice();
   const gainers = byGrowth.slice().sort((a, b) => (b.growthPct ?? 0) - (a.growthPct ?? 0)).slice(0, 3);
@@ -126,9 +158,13 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
     .map((r) => ({ ...r, marginDropPp: Math.round(((r.gpPct! - r.lyGpPct!)) * 10) / 10 }))
     .sort((a, b) => a.marginDropPp - b.marginDropPp).slice(0, 3);
 
+  // Store GP% over depts with a known margin (pending Fresh B excluded from both GP
+  // and its denominator so the % isn't diluted); pending count surfaced.
+  const gpSales = adjusted.reduce((s, d) => (d.pending ? s : s + d.sales), 0);
+  const freshBPending = adjusted.filter((d) => d.pending).map((d) => d.dept_code);
   return json({
     from, to, lyFrom: lyShift(from), lyTo: lyShift(to),
-    store: { sales: r0(storeSales), gpR: r0(storeGp), gpPct: pct(storeGp, storeSales) },
+    store: { sales: r0(storeSales), gpR: r0(storeGp), gpPct: pct(storeGp, gpSales), freshBPending },
     depts: rows,
     movers: {
       gainers: gainers.map((r) => ({ dept: r.dept, name: r.name, growthPct: r.growthPct })),
@@ -181,18 +217,29 @@ export async function handleGpBridge(req: Request, env: Env): Promise<Response> 
   const from = q.get("from"), to = q.get("to");
   if (!from || !to) return json({ error: "from and to are required." }, 400);
   const { growthPct, marginPct } = await budgetAssumptions(env);
-  const [fim, budgets, names] = await Promise.all([
+  const [fim, budgets, names, adj] = await Promise.all([
     fimByDept(env, from, to), deptSalesBudgets(env, from, to, growthPct), deptNameMap(env),
+    freshBAdjuster(env, from, to),
   ]);
-  const storeSales = fim.reduce((s, d) => s + d.sales, 0), storeCos = fim.reduce((s, d) => s + d.cos, 0);
-  const storeWaste = fim.reduce((s, d) => s + d.waste, 0), storeShrink = fim.reduce((s, d) => s + d.shrink, 0);
-  const storeBudget = fim.reduce((s, d) => s + (budgets.get(d.dept_code) ?? 0), 0);
+  // Fresh B depts: file sales+cos (GP = file) or pending (excluded from the bridge).
+  const adjusted = fim.map((d) => {
+    const a = adj(d.dept_code, d.sales, d.cos);
+    return { ...d, sales: a.sales, cos: a.cos, pending: a.pending };
+  });
+  const known = adjusted.filter((d) => !d.pending);
+  const storeSales = known.reduce((s, d) => s + d.sales, 0), storeCos = known.reduce((s, d) => s + d.cos, 0);
+  const storeWaste = known.reduce((s, d) => s + d.waste, 0), storeShrink = known.reduce((s, d) => s + d.shrink, 0);
+  const storeBudget = known.reduce((s, d) => s + (budgets.get(d.dept_code) ?? 0), 0);
   const store = gpBridge(storeSales, storeCos, storeWaste, storeShrink, storeBudget, marginPct);
-  const depts = fim.filter((d) => d.sales !== 0).map((d) => {
+  const depts = adjusted.filter((d) => d.sales !== 0).map((d) => {
+    if (d.pending) {
+      return { dept: d.dept_code, name: nameOf(names, d.dept_code, d.dept_name), marginPending: true, gpVar: 0 };
+    }
     const b = gpBridge(d.sales, d.cos, d.waste, d.shrink, budgets.get(d.dept_code) ?? 0, marginPct);
-    return { dept: d.dept_code, name: nameOf(names, d.dept_code, d.dept_name), ...b, gpVar: b.actualGp - b.budgetGp };
+    return { dept: d.dept_code, name: nameOf(names, d.dept_code, d.dept_name), ...b, gpVar: b.actualGp - b.budgetGp, marginPending: false };
   }).sort((a, b) => a.gpVar - b.gpVar);
-  return json({ from, to, params: { growthPct, marginPct }, store, depts });
+  const freshBPending = adjusted.filter((d) => d.pending).map((d) => d.dept_code);
+  return json({ from, to, params: { growthPct, marginPct }, store, depts, freshBPending });
 }
 
 /**
@@ -205,7 +252,7 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
   if (!dept || !from || !to) return json({ error: "dept, from and to are required." }, 400);
   const { growthPct, marginPct } = await budgetAssumptions(env);
 
-  const [fim, budgets, names, swellRows, purchByWeek, topArts, anoms] = await Promise.all([
+  const [fim, budgets, names, swellRows, purchByWeek, topArts, anoms, adj] = await Promise.all([
     fimByDept(env, from, to),
     deptSalesBudgets(env, from, to, growthPct),
     deptNameMap(env),
@@ -242,10 +289,15 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
        WHERE resolved=0 AND (json_extract(detail_json,'$.deptCode')=?1 OR message LIKE ?4)
        ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
     ).bind(dept, from, to, `${dept} %`).all<{ type: string; severity: string; message: string; detail_json: string | null }>(),
+    freshBAdjuster(env, from, to),
   ]);
 
-  const d = fim.find((x) => x.dept_code === dept) ?? { dept_code: dept, dept_name: dept, sales: 0, cos: 0, waste: 0, shrink: 0 };
-  const bridge = gpBridge(d.sales, d.cos, d.waste, d.shrink, budgets.get(dept) ?? 0, marginPct);
+  const dRaw = fim.find((x) => x.dept_code === dept) ?? { dept_code: dept, dept_name: dept, sales: 0, cos: 0, waste: 0, shrink: 0 };
+  // Fresh B: sales+cos from the weekly_freshb file (GP = file) or pending (no file).
+  const a = adj(dept, dRaw.sales, dRaw.cos);
+  const d = { ...dRaw, sales: a.sales, cos: a.cos };
+  const marginPending = a.pending;
+  const bridge = marginPending ? null : gpBridge(d.sales, d.cos, d.waste, d.shrink, budgets.get(dept) ?? 0, marginPct);
   const purchMap = new Map((purchByWeek.results ?? []).map((r) => [r.wk, r.cost]));
   const swell = (swellRows.results ?? []).map((s) => {
     const purchases = r0(purchMap.get(s.wk) ?? 0);
@@ -258,7 +310,8 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
   return json({
     dept, name: nameOf(names, dept, d.dept_name), from, to,
     isFreshB: /^(F04|F06|F07|F09|F10|F64|F68|F77)$/.test(dept),
-    summary: { sales: r0(d.sales), gpR: r0(d.sales - d.cos), gpPct: pct(d.sales - d.cos, d.sales), waste: r0(d.waste), wastePct: pct(d.waste, d.sales), shrink: r0(d.shrink), shrinkPct: pct(d.shrink, d.sales) },
+    marginPending,
+    summary: { sales: r0(d.sales), gpR: marginPending ? null : r0(d.sales - d.cos), gpPct: marginPending ? null : pct(d.sales - d.cos, d.sales), waste: r0(d.waste), wastePct: pct(d.waste, d.sales), shrink: r0(d.shrink), shrinkPct: pct(d.shrink, d.sales) },
     bridge,
     swell,
     topArticles: (topArts.results ?? []).map((a) => ({ code: a.code, desc: a.desc_, grValue: r0(a.grValue), fimSales: a.fimSales != null ? r0(a.fimSales) : null, fimWaste: a.fimWaste != null ? r0(a.fimWaste) : null })),

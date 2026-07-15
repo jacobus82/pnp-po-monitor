@@ -763,6 +763,15 @@ async function handleFanScoreUpload(req: Request, env: Env): Promise<Response> {
   }
 }
 
+/** True iff [from,to] is a full Monday→Sunday week (UTC: Mon=1 start, Sun=0 end, 6-day span). */
+function isFullMonSunWeek(from: string, to: string): boolean {
+  if (!from || !to) return false;
+  const a = new Date(from + "T00:00:00Z");
+  const b = new Date(to + "T00:00:00Z");
+  const span = (b.getTime() - a.getTime()) / 86_400_000;
+  return a.getUTCDay() === 1 && b.getUTCDay() === 0 && span === 6;
+}
+
 /** POST /api/fim-uploads — ingest a FIM department spreadsheet (xlsx). */
 async function handleFimUpload(req: Request, env: Env): Promise<Response> {
   const read = await readUploadEntry(req, "fim");
@@ -844,8 +853,25 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
       );
     }
 
-    // Period-level dedup: if this exact period is already loaded, skip.
-    if (await fimPeriodExists(env, parsed.dateFrom, parsed.dateTo)) {
+    // Fresh B weekly source detection (CONTENT-based, not filename): a file whose
+    // only non-TOTAL departments are all Fresh B AND whose range is a full Mon–Sun
+    // week is the dedicated post-stocktake Fresh B margin export. Tag it
+    // 'weekly_freshb' so freshBWeeklyMargin() sources margin/COS exclusively from it
+    // (the general weekly/daily FIM carry the wrong Fresh B cost). Mixed-dept weekly
+    // files stay general 'weekly'.
+    const fbCfg = await getFreshBConfig(env);
+    const fileDepts = new Set(
+      parsed.rows.map((r) => r.deptCode).filter((c): c is string => !!c && c !== "TOTAL"),
+    );
+    const isFreshbWeekly =
+      fileDepts.size > 0 &&
+      [...fileDepts].every((c) => fbCfg.depts.has(c)) &&
+      isFullMonSunWeek(parsed.dateFrom, parsed.dateTo);
+    const effectiveReportType = isFreshbWeekly ? "weekly_freshb" : parsed.reportType;
+
+    // Period-level dedup: keyed by (range, is-freshb) so a Fresh B weekly file is not
+    // rejected when a general weekly for the same week already exists, and vice versa.
+    if (await fimPeriodExists(env, parsed.dateFrom, parsed.dateTo, effectiveReportType)) {
       await markUploadError(env, uploadId, "duplicate period, skipped");
       return json(
         {
@@ -863,7 +889,7 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
       reportDate: parsed.reportDate,
       dateFrom: parsed.dateFrom,
       dateTo: parsed.dateTo,
-      reportType: parsed.reportType,
+      reportType: effectiveReportType,
     };
     // CP (going-forward) daily files are Category-Portfolio keyed → roll up to
     // SAP departments via the merchandise hierarchy before storing.
@@ -1534,7 +1560,7 @@ async function handleFimIma(req: Request, env: Env): Promise<Response> {
         COALESCE(SUM(total_shortages_zar),0)  AS total_shortages_zar,
         COALESCE(SUM(net_shrinkage_zar),0)    AS net_shrinkage_zar,
         COALESCE(SUM(rtc_zar),0)              AS rtc_zar
-     FROM fim_daily WHERE dept_code != 'TOTAL' AND report_date >= ? AND report_date <= ?`,
+     FROM fim_daily WHERE dept_code != 'TOTAL' AND report_type != 'weekly_freshb' AND report_date >= ? AND report_date <= ?`,
   )
     .bind(from, to)
     .first<Record<string, number>>();
@@ -1552,7 +1578,7 @@ async function handleFimIma(req: Request, env: Env): Promise<Response> {
             SUM(CASE WHEN operating_margin_pct IS NOT NULL THEN net_sales_zar ELSE 0 END) AS op_ns,
             SUM(net_sales_zar * store_margin_pct) AS st_w,
             SUM(CASE WHEN store_margin_pct IS NOT NULL THEN net_sales_zar ELSE 0 END) AS st_ns
-     FROM fim_daily WHERE dept_code = 'TOTAL' AND report_date >= ? AND report_date <= ?`,
+     FROM fim_daily WHERE dept_code = 'TOTAL' AND report_type != 'weekly_freshb' AND report_date >= ? AND report_date <= ?`,
   )
     .bind(from, to)
     .first<{ op_w: number | null; op_ns: number | null; st_w: number | null; st_ns: number | null }>();
@@ -1592,7 +1618,7 @@ async function handleFimIma(req: Request, env: Env): Promise<Response> {
 /** GET /api/fim/summary?from=&to=&dept=&fy=&quarter=&week= */
 async function handleFimSummary(req: Request, env: Env): Promise<Response> {
   const q = new URL(req.url).searchParams;
-  const where: string[] = ["dept_code != 'TOTAL'"];
+  const where: string[] = ["dept_code != 'TOTAL'", "report_type != 'weekly_freshb'"];
   const binds: unknown[] = [];
   const addEq = (col: string, val: string | null, cast?: (v: string) => unknown) => {
     if (val == null || val === "") return;
@@ -1678,8 +1704,8 @@ async function handleFimSummary(req: Request, env: Env): Promise<Response> {
 async function handleFimDepartments(env: Env): Promise<Response> {
   const rows = await env.DB.prepare(
     `SELECT f.* FROM fim_daily f
-     WHERE f.dept_code != 'TOTAL'
-       AND f.report_date = (SELECT MAX(report_date) FROM fim_daily f2 WHERE f2.dept_code = f.dept_code)`,
+     WHERE f.dept_code != 'TOTAL' AND f.report_type != 'weekly_freshb'
+       AND f.report_date = (SELECT MAX(report_date) FROM fim_daily f2 WHERE f2.dept_code = f.dept_code AND f2.report_type != 'weekly_freshb')`,
   ).all<Record<string, number | string | null>>();
 
   const guidelines = await fetchCurrentGuidelines(env);
@@ -1717,7 +1743,7 @@ async function handleFimTrend(req: Request, env: Env): Promise<Response> {
   // per-dept aggregation (else it surfaces as a fake "TOTAL" department). Store
   // totals are always the sum of real depts; the TOTAL row is read only for the
   // store-level *_margin_pct columns that aren't stored per dept (handleFimIma).
-  const where: string[] = ["dept_code != 'TOTAL'"];
+  const where: string[] = ["dept_code != 'TOTAL'", "report_type != 'weekly_freshb'"];
   const binds: unknown[] = [];
   if (q.get("dept")) {
     where.push("dept_code = ?");
@@ -1896,13 +1922,15 @@ async function buildMarginPerformance(
   env: Env,
   guidelines: Awaited<ReturnType<typeof fetchCurrentGuidelines>>,
 ) {
-  const latest = await env.DB.prepare(`SELECT MAX(report_date) AS d FROM fim_daily`).first<{ d: string | null }>();
+  const latest = await env.DB.prepare(
+    `SELECT MAX(report_date) AS d FROM fim_daily WHERE report_type != 'weekly_freshb'`,
+  ).first<{ d: string | null }>();
   const reportDate = latest?.d ?? null;
   if (!reportDate) return null;
 
   const rows = await env.DB.prepare(
     `SELECT dept_code, dept_name, net_sales_zar, pos_margin_pct
-     FROM fim_daily WHERE report_date = ?`,
+     FROM fim_daily WHERE report_date = ? AND report_type != 'weekly_freshb'`,
   )
     .bind(reportDate)
     .all<{ dept_code: string; dept_name: string | null; net_sales_zar: number | null; pos_margin_pct: number | null }>();

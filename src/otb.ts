@@ -32,7 +32,7 @@ async function lySalesByDept(env: Env, from: string, to: string): Promise<Map<st
     `WITH RECURSIVE _days(d) AS (SELECT ?1 UNION ALL SELECT date(d,'+1 day') FROM _days WHERE d < ?2),
       _c AS (SELECT _days.d day, f.dept_code dc, (julianday(f.date_to)-julianday(f.date_from)+1) span, f.net_sales_zar ns,
                ROW_NUMBER() OVER (PARTITION BY _days.d, f.dept_code ORDER BY (julianday(f.date_to)-julianday(f.date_from)) ASC, CASE f.report_type WHEN 'daily' THEN 0 WHEN 'weekly' THEN 1 ELSE 2 END) rn
-             FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.date_from<=_days.d AND f.date_to>=_days.d)
+             FROM _days JOIN fim_daily f ON f.dept_code!='TOTAL' AND f.report_type!='weekly_freshb' AND f.date_from<=_days.d AND f.date_to>=_days.d)
      SELECT dc dept, ROUND(SUM(ns/span)) sales FROM _c WHERE rn=1 GROUP BY dc`,
   ).bind(from, to).all<{ dept: string; sales: number }>();
   return new Map((res.results ?? []).map((r) => [r.dept, r.sales]));
