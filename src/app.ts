@@ -1764,21 +1764,43 @@ function ccFyStart(iso){var y=+iso.slice(0,4),m=+iso.slice(5,7);return (m>=3?y:y
 function ccLastFY(iso){var y=+ccFyStart(iso).slice(0,4);var feb=new Date(Date.UTC(y,2,0)).toISOString().slice(0,10);return [(y-1)+"-03-01",feb]}
 function ccVarCell(v){if(v==null)return "\\u2014";var cls=v>0?"pos":v<0?"neg":"";return '<span class="'+cls+'">'+(v>=0?"+":"")+v.toFixed(1)+"%</span>"}
 function ccFriendly(s){var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var p=String(s||"").split("-");return p.length===3?(+p[2])+" "+M[(+p[1])-1]+" "+p[0]:(s||"")}
-// Daily customers line chart (TY solid navy, optional LY dashed grey); x labels every 14 days.
+// "01–31 Jul 2026" when a & b share a month, else "1 Jul 2026 – 5 Aug 2026".
+function ccPeriodLabel(a,b){if(!a||!b)return "";var M=["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];var pa=String(a).split("-"),pb=String(b).split("-");if(pa.length!==3||pb.length!==3)return "";function p2(x){return (x<10?"0":"")+x}if(pa[0]===pb[0]&&pa[1]===pb[1])return p2(+pa[2])+"\\u2013"+p2(+pb[2])+" "+M[(+pb[1])-1]+" "+pb[0];return ccFriendly(a)+" \\u2013 "+ccFriendly(b)}
+// Daily customers (navy, left axis) + imported avg-basket (amber, right axis). Every TY
+// point gets a dot; when <=31 points the figures are drawn as fixed labels (counts above,
+// basket below), otherwise dots carry the value in a hover <title> to avoid collisions.
+// Only the IMPORTED basket (avg_basket_value, from the source file) is plotted — never a
+// derived sales/customers figure — so the two feeds are not blended on one line.
 function ccDailyChart(rows,showLy){
   var pts=(rows||[]).slice().reverse().filter(function(r){return r.customers_ty!=null});
   if(pts.length<2)return '<div class="muted small">Not enough days for a chart.</div>';
-  var W=760,H=240,pad=40,n=pts.length;
-  var vals=pts.map(function(p){return p.customers_ty||0});
-  if(showLy)vals=vals.concat(pts.map(function(p){return p.customers_ly||0}));
-  var mx=Math.max.apply(null,vals)||1;
-  function X(i){return pad+(n<=1?(W-2*pad)/2:i*(W-2*pad)/(n-1))}
-  function Y(v){return H-pad-((v||0)/mx)*(H-2*pad)}
-  function poly(key,col,dash){return '<polyline points="'+pts.map(function(p,i){return X(i).toFixed(1)+","+Y(p[key]).toFixed(1)}).join(" ")+'" fill="none" stroke="'+col+'" stroke-width="2"'+(dash?' stroke-dasharray="5 4"':'')+'/>'}
-  var xlabs=pts.map(function(p,i){if(i%14!==0&&i!==n-1)return "";return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="10" fill="#6a7480" text-anchor="middle">'+esc(shortDate(p.cal_date))+'</text>'}).join("");
-  var yax='<text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">0</text><text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#6a7480" text-anchor="end">'+num(mx)+'</text>';
-  var legend='<div class="small" style="margin-bottom:6px"><span style="color:#2E6CA8;font-weight:700">\\u25CF This year</span>'+(showLy?' &nbsp; <span style="color:#9aa4ae;font-weight:700">\\u25CF Last year</span>':'')+'</div>';
-  return legend+'<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-pad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+(showLy?poly("customers_ly","#9aa4ae",true):"")+poly("customers_ty","#2E6CA8",false)+yax+xlabs+'</svg></div>';
+  var W=760,H=260,pad=40,rpad=52,n=pts.length,labels=(n<=31);
+  var cvals=pts.map(function(p){return p.customers_ty||0});
+  if(showLy)cvals=cvals.concat(pts.map(function(p){return p.customers_ly||0}));
+  var cmx=Math.max.apply(null,cvals)||1;
+  var bvals=pts.map(function(p){return p.avg_basket_value}).filter(function(v){return v!=null});
+  var hasB=bvals.length>0,bmx=hasB?Math.max.apply(null,bvals):1;
+  function X(i){return pad+(n<=1?(W-pad-rpad)/2:i*(W-pad-rpad)/(n-1))}
+  function Yc(v){return H-pad-((v||0)/cmx)*(H-2*pad)}
+  function Yb(v){return H-pad-((v||0)/bmx)*(H-2*pad)}
+  function polyC(key,col,dash){return '<polyline points="'+pts.map(function(p,i){return X(i).toFixed(1)+","+Yc(p[key]).toFixed(1)}).join(" ")+'" fill="none" stroke="'+col+'" stroke-width="2"'+(dash?' stroke-dasharray="5 4"':'')+'/>'}
+  var bseg=[];pts.forEach(function(p,i){if(p.avg_basket_value!=null)bseg.push(X(i).toFixed(1)+","+Yb(p.avg_basket_value).toFixed(1))});
+  var bpoly=hasB?'<polyline points="'+bseg.join(" ")+'" fill="none" stroke="#d97706" stroke-width="2"/>':"";
+  var dotsC=pts.map(function(p,i){var x=X(i).toFixed(1),y=Yc(p.customers_ty),ys=y.toFixed(1);
+    var s='<circle cx="'+x+'" cy="'+ys+'" r="'+(labels?"3":"2.5")+'" fill="#2E6CA8"><title>'+esc(shortDate(p.cal_date))+": "+num(p.customers_ty)+' customers</title></circle>';
+    if(labels)s+='<text x="'+x+'" y="'+(y-7).toFixed(1)+'" font-size="9" fill="#2E6CA8" text-anchor="middle">'+num(p.customers_ty)+'</text>';
+    return s;}).join("");
+  var dotsB=hasB?pts.map(function(p,i){if(p.avg_basket_value==null)return "";var x=X(i).toFixed(1),y=Yb(p.avg_basket_value),ys=y.toFixed(1);
+    var s='<circle cx="'+x+'" cy="'+ys+'" r="'+(labels?"3":"2.5")+'" fill="#d97706"><title>'+esc(shortDate(p.cal_date))+": "+Rr(p.avg_basket_value)+' basket</title></circle>';
+    if(labels)s+='<text x="'+x+'" y="'+(y+13).toFixed(1)+'" font-size="9" fill="#d97706" text-anchor="middle">'+num(Math.round(p.avg_basket_value))+'</text>';
+    return s;}).join(""):"";
+  var dotsLy=showLy?pts.map(function(p,i){if(p.customers_ly==null)return "";return '<circle cx="'+X(i).toFixed(1)+'" cy="'+Yc(p.customers_ly).toFixed(1)+'" r="2.5" fill="#9aa4ae"><title>'+esc(shortDate(p.cal_date))+": "+num(p.customers_ly)+' customers LY</title></circle>'}).join(""):"";
+  var xstep=labels?(n<=14?1:2):14;
+  var xlabs=pts.map(function(p,i){if(i%xstep!==0&&i!==n-1)return "";return '<text x="'+X(i).toFixed(1)+'" y="'+(H-pad+16)+'" font-size="9" fill="#6a7480" text-anchor="middle">'+esc(shortDate(p.cal_date))+'</text>'}).join("");
+  var yax='<text x="'+(pad-6)+'" y="'+(H-pad)+'" font-size="10" fill="#6a7480" text-anchor="end">0</text><text x="'+(pad-6)+'" y="'+(pad+4)+'" font-size="10" fill="#2E6CA8" text-anchor="end">'+num(cmx)+'</text>'
+    +(hasB?'<text x="'+(W-rpad+8)+'" y="'+(pad+4)+'" font-size="10" fill="#d97706" text-anchor="start">'+Rr0(bmx)+'</text>':"");
+  var legend='<div class="small" style="margin-bottom:6px"><span style="color:#2E6CA8;font-weight:700">\\u25CF Customers (TY)</span>'+(showLy?' &nbsp; <span style="color:#9aa4ae;font-weight:700">\\u25CF Customers (LY)</span>':'')+(hasB?' &nbsp; <span style="color:#d97706;font-weight:700">\\u25CF Avg basket \\u2013 imported (R, right axis)</span>':'')+'</div>';
+  return legend+'<div class="svgwrap"><svg viewBox="0 0 '+W+' '+H+'"><line x1="'+pad+'" y1="'+(H-pad)+'" x2="'+(W-rpad)+'" y2="'+(H-pad)+'" stroke="#e2e7ec"/>'+(showLy?polyC("customers_ly","#9aa4ae",true):"")+bpoly+polyC("customers_ty","#2E6CA8",false)+dotsLy+dotsB+dotsC+yax+xlabs+'</svg></div>';
 }
 // Average customers (TY) grouped by day of week (Mon..Sun).
 function byDayOfWeek(rows){
@@ -1798,7 +1820,7 @@ PAGES.customers=function(){
     +'<button class="btn alt" id="ccLyToggle">Show LY</button>'
     +'<span class="muted small" id="ccRange"></span></div>'
     +'<div id="ccBody"><div class="loading">Loading\\u2026</div></div>');
-  var latest=null,showLy=false,lastRows=[];
+  var latest=null,showLy=false,lastRows=[],lastRange=null;
   function pad2(n){return (n<10?"0":"")+n}
   function rangeFor(p){
     if(!latest)return null;
@@ -1814,17 +1836,25 @@ PAGES.customers=function(){
   function render(rows){
     rows=rows||[];var body=$("ccBody");if(!body)return;
     if(!rows.length){body.innerHTML='<div class="muted small" style="padding:16px">No customer data for this period.</div>';return;}
-    var cty=0,cly=0,sty=0,sly=0,bsum=0,bcnt=0;
-    rows.forEach(function(r){cty+=r.customers_ty||0;cly+=r.customers_ly||0;sty+=r.sales_ty_zar||0;sly+=r.sales_ly_zar||0;if(r.avg_basket_value!=null){bsum+=r.avg_basket_value;bcnt++}});
+    var cty=0,cly=0,sty=0,sly=0,bsum=0,bcnt=0,cdays=0,cldays=0;
+    rows.forEach(function(r){if(r.customers_ty!=null){cty+=r.customers_ty;cdays++;}if(r.customers_ly!=null){cly+=r.customers_ly;cldays++;}sty+=r.sales_ty_zar||0;sly+=r.sales_ly_zar||0;if(r.avg_basket_value!=null){bsum+=r.avg_basket_value;bcnt++}});
     var cvar=cly>0?Math.round((cty-cly)/cly*1000)/10:null;
     var svar=sly>0?Math.round((sty-sly)/sly*1000)/10:null;
+    // Avg daily customers is scoped to the picker's range and divides by TRADING days
+    // (cal_date rows with a TY count), so closed/blank days don't deflate it. Label
+    // names the period; sub shows the same-period-LY delta (LY averaged over its own
+    // trading days).
+    var avgTy=cdays?Math.round(cty/cdays):null;
+    var avgLy=cldays?Math.round(cly/cldays):null;
+    var avgVar=(avgTy!=null&&avgLy!=null&&avgLy>0)?Math.round((avgTy-avgLy)/avgLy*1000)/10:null;
+    var perLbl=lastRange?ccPeriodLabel(lastRange[0],lastRange[1]):"";
     var h='<div class="cards kpis">'
       +kpi("Customers (TY)",num(cty),(cly?num(cly)+" LY":null))
       +kpi("Customers \\u0394",ccVarCell(cvar),"vs LY")
       +kpi("Sales (TY)",Rr0(sty),(sly?Rr0(sly)+" LY":null))
       +kpi("Sales \\u0394",ccVarCell(svar),"vs LY")
-      +kpi("Avg basket",bcnt?Rr(bsum/bcnt):"\\u2014",null)
-      +kpi("Avg daily customers",num(Math.round(cty/rows.length)),null)
+      +kpi("Avg basket"+(perLbl?" \\u00b7 "+perLbl:""),bcnt?Rr(bsum/bcnt):"\\u2014","imported, "+bcnt+" day"+(bcnt===1?"":"s"))
+      +kpi("Avg daily customers"+(perLbl?" \\u00b7 "+perLbl:""),avgTy!=null?num(avgTy):"\\u2014",(avgVar!=null?ccVarCell(avgVar)+" vs LY":(avgLy!=null?num(avgLy)+" LY":cdays+" trading day"+(cdays===1?"":"s"))))
       +'</div>';
     h+='<div class="card" style="margin-top:12px"><h2>Daily customers</h2>'+ccDailyChart(rows,showLy)+'</div>';
     h+='<div class="card" style="margin-top:12px"><h2>Average customers by day of week</h2>'+byDayOfWeek(rows)+'</div>';
@@ -1837,6 +1867,7 @@ PAGES.customers=function(){
     cols.push({key:"sales_ty_zar",label:"Sales TY",num:true,fmt:Rr0});
     if(showLy)cols.push({key:"sales_ly_zar",label:"Sales LY",num:true,fmt:Rr0});
     cols.push({key:"sales_var_pct",label:"Var%",num:true,html:function(r){return ccVarCell(r.sales_var_pct)}});
+    cols.push({key:"avg_basket_value",label:"Basket",num:true,html:function(r){return r.avg_basket_value!=null?Rr(r.avg_basket_value):"\\u2014"}});
     h+='<div class="card" style="margin-top:12px"><h2>Daily detail</h2>'+makeTable(cols,rows,{cards:true,rowMenu:false,search:false})+'</div>';
     body.innerHTML=h;
   }
@@ -1845,6 +1876,7 @@ PAGES.customers=function(){
     if(period==="custom"){var f=$("ccFrom").value,t=$("ccTo").value;if(!f||!t){$("ccRange").textContent="pick both dates";return;}rng=[f,t];}
     else rng=rangeFor(period);
     if(!rng)return;
+    lastRange=rng;
     $("ccRange").innerHTML=esc(rng[0])+' <span class="muted">\\u2192</span> '+esc(rng[1]);
     $("ccBody").innerHTML='<div class="loading">Loading\\u2026</div>';
     api("/api/customer-counts/daily?from="+rng[0]+"&to="+rng[1]).then(function(rows){lastRows=rows||[];render(lastRows);}).catch(function(e){$("ccBody").innerHTML='<div class="err">'+esc(e.message)+'</div>';});
