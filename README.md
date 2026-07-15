@@ -371,3 +371,25 @@ margin rate → −waste → −shrink → residual → Actual GP — with the r
 rounding so the components reconcile to the rand (the endpoint asserts and returns
 the check). The Brief's Trading/Loss and OTB dept rows all drill into the dossier.
 Friendly department names live in `app_settings.dept_names` (editable in Settings).
+
+## Customer Count — average basket value
+
+The Customer Count screen (`#customers`, `/api/customer-counts/daily`) plots daily
+TY customers (navy, left axis) against the **imported average basket** (amber, right
+axis). Basket is the source file's "Ave Customer Value TY" column
+(`customer_counts.basket_ty_cents`) — always the imported figure, never a derived
+`sales ÷ customers`, so the two feeds are never blended on one line. Each point shows
+a dot; ranges of ≤ 31 days label every point (counts above, basket below), and larger
+ranges drop the labels and put the value in a hover tooltip to avoid collisions.
+
+The KPI blocks name the selected period (e.g. `Avg daily customers · 01–31 Jul 2026`)
+and change with the picker; **Avg daily customers** divides by trading days (days that
+carry a TY count) so store-closed days don't deflate it, and it shows the same-period
+LY delta. The daily-detail table carries the per-day basket and tags store-closed
+public holidays (no customers recorded) with a subtle *· closed* marker — those days
+have no basket in the source and stay "—" rather than being back-filled.
+
+**Cross-check:** the imported basket × customers ties to resolved FIM sales within
+whole-rand rounding (e.g. 2026-07-11: 159 × 2,202 = R350,118 vs FIM R349,641 = +0.14%).
+Resolved FIM store sales come from the `fim_daily` `dept_code='TOTAL'` row (or the sum
+of real depts) — never the sum of *all* rows, which would double-count the TOTAL row.

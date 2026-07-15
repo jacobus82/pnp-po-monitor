@@ -1859,7 +1859,7 @@ PAGES.customers=function(){
     h+='<div class="card" style="margin-top:12px"><h2>Daily customers</h2>'+ccDailyChart(rows,showLy)+'</div>';
     h+='<div class="card" style="margin-top:12px"><h2>Average customers by day of week</h2>'+byDayOfWeek(rows)+'</div>';
     var cols=[
-      {key:"cal_date",label:"Date",html:function(r){return esc(ccFriendly(r.cal_date))}},
+      {key:"cal_date",label:"Date",html:function(r){return esc(ccFriendly(r.cal_date))+(r.customers_ty==null?' <span class="muted" style="font-size:11px;font-style:italic">\\u00b7 closed</span>':"")}},
       {key:"customers_ty",label:"Cust TY",num:true,fmt:num}
     ];
     if(showLy)cols.push({key:"customers_ly",label:"Cust LY",num:true,fmt:num});

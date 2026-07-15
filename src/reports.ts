@@ -148,7 +148,7 @@ export async function handleReport(_req: Request, env: Env, name: string): Promi
         env,
         `SELECT dept_code, dept_name, report_date, net_sales_zar, pos_margin_pct, operating_margin_pct,
                 shrink_zar, waste_zar, store_margin_pct
-         FROM fim_daily WHERE report_date=(SELECT MAX(report_date) FROM fim_daily) ORDER BY net_sales_zar DESC`,
+         FROM fim_daily WHERE dept_code != 'TOTAL' AND report_date=(SELECT MAX(report_date) FROM fim_daily) ORDER BY net_sales_zar DESC`,
       );
       const aoa: unknown[][] = [
         ["Dept", "Name", "Report date", "Net sales (R)", "POS margin %", "Operating margin %", "Shrink (R)", "Waste (R)", "Store margin %"],

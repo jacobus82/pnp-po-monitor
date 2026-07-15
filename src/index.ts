@@ -1712,7 +1712,11 @@ async function handleFimDepartments(env: Env): Promise<Response> {
 /** GET /api/fim/trend?dept= — weekly margin rollup per dept for sparklines. */
 async function handleFimTrend(req: Request, env: Env): Promise<Response> {
   const q = new URL(req.url).searchParams;
-  const where: string[] = [];
+  // Convention: exclude the fim_daily dept_code='TOTAL' store-total row from any
+  // per-dept aggregation (else it surfaces as a fake "TOTAL" department). Store
+  // totals are always the sum of real depts; the TOTAL row is read only for the
+  // store-level *_margin_pct columns that aren't stored per dept (handleFimIma).
+  const where: string[] = ["dept_code != 'TOTAL'"];
   const binds: unknown[] = [];
   if (q.get("dept")) {
     where.push("dept_code = ?");
