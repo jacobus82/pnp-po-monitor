@@ -865,12 +865,13 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
     // cpToDeptMap the storage path uses), else an FB export in CP format would be
     // misclassified as a general weekly and silently ignored for FB margin.
     const cpMap = parsed.isCpFormat ? await cpToDeptMap(env) : null;
-    const toDept = (code: string): string => (cpMap ? cpMap.get(code)?.deptCode ?? code : code);
     const fbCfg = await getFreshBConfig(env);
+    // Resolve the file's SAP departments the SAME way storage does — aggregateCpToDept
+    // for CP files (which drops unmapped CP article codes), else native dept codes — so
+    // a handful of unmapped articles don't spuriously fail the Fresh-B-subset test.
+    const detectRows = cpMap ? aggregateCpToDept(parsed.rows, cpMap) : parsed.rows;
     const fileDepts = new Set(
-      parsed.rows
-        .map((r) => (r.deptCode ? toDept(r.deptCode) : r.deptCode))
-        .filter((c): c is string => !!c && c !== "TOTAL"),
+      detectRows.map((r) => r.deptCode).filter((c): c is string => !!c && c !== "TOTAL"),
     );
     const isFreshbWeekly =
       fileDepts.size > 0 &&
