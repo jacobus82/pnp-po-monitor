@@ -2920,17 +2920,24 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
   var days=["Monday","Tuesday","Wednesday","Thursday","Friday","Saturday","Sunday"];
   function daySel(id,cur){return '<select class="inp" id="'+id+'">'+days.map(function(d){return '<option'+(d===cur?' selected':'')+'>'+d+'</option>'}).join("")+'</select>'}
   var fbBoxes=FRESHB.map(function(d){var on=fbSel.indexOf(d[0])>=0;return '<label style="display:inline-block;margin:4px 14px 4px 0;white-space:nowrap"><input type="checkbox" class="fbdept" value="'+d[0]+'"'+(on?' checked':'')+'> '+d[0]+' '+esc(d[1])+'</label>'}).join("");
+  // Per-dept expected daily-vs-weekly sales gap (%). A known basis difference (e.g. F04
+  // Deli production consumption netting) is annotated muted; only gaps beyond it flag red.
+  var fbGap={};try{fbGap=s.freshb_expected_gap?JSON.parse(s.freshb_expected_gap):{}}catch(e){fbGap={}}
+  var gapInputs=FRESHB.map(function(d){var v=fbGap[d[0]];return '<label style="display:inline-block;margin:4px 14px 4px 0;white-space:nowrap">'+d[0]+' <input type="number" step="0.5" min="0" class="inp fbgap" data-dept="'+d[0]+'" value="'+(v!=null?v:"")+'" style="width:60px"> %</label>'}).join("");
   var freshCard='<div class="card" style="margin-top:14px"><h2>Fresh Departments</h2>'
     +'<div class="muted small" style="margin-bottom:10px">Fresh B departments (stocktake weekly). Daily FIM margin for these departments is suppressed \\u2014 only weekly (post-stocktake) FIM is used for margin reporting.</div>'
     +'<div style="margin-bottom:12px">'+fbBoxes+'</div>'
     +'<div class="hbar" style="grid-template-columns:240px 200px 1fr"><span class="lab">Stocktake day</span>'+daySel("set_fresh_b_stocktake_day",s.fresh_b_stocktake_day||"Sunday")+'<span></span></div>'
     +'<div class="hbar" style="grid-template-columns:240px 200px 1fr"><span class="lab">FIM upload day</span>'+daySel("set_fresh_b_fim_upload_day",s.fresh_b_fim_upload_day||"Tuesday")+'<span></span></div>'
+    +'<div class="muted small" style="margin:12px 0 6px">Expected weekly-file vs daily-sum sales gap per dept (%). A known basis difference is annotated muted on the dossier; only gaps BEYOND this band flag red. Blank = alarm above 2%.</div>'
+    +'<div style="margin-bottom:6px">'+gapInputs+'</div>'
     +'<div style="margin-top:10px"><button class="btn" onclick="saveFreshDepts()">Save fresh departments</button> <span id="fresh_msg" class="small muted"></span></div></div>';
   setHTML(form+gl+freshCard+wbCard);
 }).catch(errBox)};
 function saveFreshDepts(){
   var depts=[];document.querySelectorAll(".fbdept").forEach(function(c){if(c.checked)depts.push(c.value)});
-  var body={fresh_b_depts:depts.join(","),fresh_b_stocktake_day:$("set_fresh_b_stocktake_day").value,fresh_b_fim_upload_day:$("set_fresh_b_fim_upload_day").value};
+  var gap={};document.querySelectorAll(".fbgap").forEach(function(i){var v=String(i.value).trim();if(v!==""&&!isNaN(Number(v)))gap[i.getAttribute("data-dept")]=Number(v)});
+  var body={fresh_b_depts:depts.join(","),fresh_b_stocktake_day:$("set_fresh_b_stocktake_day").value,fresh_b_fim_upload_day:$("set_fresh_b_fim_upload_day").value,freshb_expected_gap:JSON.stringify(gap)};
   var msg=$("fresh_msg");if(msg)msg.textContent="Saving\\u2026";
   adminSend("/api/settings","PUT",body).then(function(){if(msg)msg.textContent="Saved."}).catch(function(e){if(msg)msg.textContent="Error: "+(e&&e.message||e)});
 }
