@@ -1642,13 +1642,15 @@ PAGES.weekly=function(){
       var poRows=scaf.map(function(s){var x=poBy[s.date]||{};return {day:s.day,date:s.date,purchases:x.purchasesCents||0,returns:x.returnsCents||0,lines:x.lines||0}});
       var grRows=scaf.map(function(s){var x=grBy[s.date]||{};return {day:s.day,date:s.date,cost:x.costZar||0,sell:x.sellZar||0,margin:x.marginPct}});
       var fimRows=scaf.map(function(s){var x=fimBy[s.date]||{};return {day:s.day,date:s.date,sales:x.salesZar||0,cos:x.cosZar||0,margin:x.marginPct}});
+      var fimDaysN=(db.fim||[]).length;
+      function daysBadge(n){return n<scaf.length?' <span class="tag" style="border-color:var(--amber);color:var(--amber)" title="This day-by-day view is running on a partial week \\u2014 the daily FIM feed is missing days">'+n+'/'+scaf.length+' days loaded</span>':'';}
       // Four day-by-day blocks: purchase orders, goods receipts, FIM margins, + anomalies.
       h+='<div class="cards g2" style="margin-top:14px">'
         +'<div class="card"><h2>Day by day purchase orders</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"purchases",label:"Purchases",num:true,fmt:R},{key:"returns",label:"Returns",num:true,fmt:R},{key:"lines",label:"Lines",num:true}],poRows)+'</div>'
         +'<div class="card"><h2>Day by day goods receipts</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"cost",label:"GR cost",num:true,fmt:Rr0},{key:"sell",label:"GR sell",num:true,fmt:Rr0},{key:"margin",label:"Margin",num:true,html:marginCell}],grRows)+'</div>'
         +'</div>';
       h+='<div class="cards g2" style="margin-top:14px">'
-        +'<div class="card"><h2>Day by day FIM margins</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"sales",label:"Sales",num:true,fmt:Rr0},{key:"cos",label:"COS",num:true,fmt:Rr0},{key:"margin",label:"POS margin",num:true,html:marginCell}],fimRows)+'<div class="legend">Fresh-B departments contribute weekly-averaged margins (daily figures suppressed).</div></div>'
+        +'<div class="card"><h2>Day by day FIM margins'+daysBadge(fimDaysN)+'</h2>'+mtable([{key:"day",label:"Day"},{key:"date",label:"Date"},{key:"sales",label:"Sales",num:true,fmt:Rr0},{key:"cos",label:"COS",num:true,fmt:Rr0},{key:"margin",label:"POS margin",num:true,html:marginCell}],fimRows)+'<div class="legend">Fresh B margin is the weekly stocktake figure (see the dossier); daily rows here are indicative only.</div></div>'
         +'<div class="card"><h2>Anomalies this week</h2>'+anomTableHTML(an.anomalies||[],false,"this week")+'</div>'
         +'</div>';
       h+=grFimSection(gr,fim);
@@ -2455,16 +2457,30 @@ function dlRender(){
   el.innerHTML=head+tbl;
 }
 
+// Fresh B file-vs-daily basis annotation for a dept's GP: muted when the divergence is
+// within the known expected band (e.g. F04 Deli production netting), red (anomaly) when
+// beyond it. Empty when there's no complete-week divergence.
+function deptBasisNote(ig){
+  if(!ig)return "";
+  var txt='daily basis '+(ig.deltaPct>0?"+":"")+ig.deltaPct+'%'+(ig.expectedPct!=null?' (expected \\u2264'+ig.expectedPct+'%)':'');
+  return ' <span class="'+(ig.withinBand?"muted":"neg")+'" title="Weekly file sales vs the daily FIM sum on a complete week. Within the known basis band is expected (e.g. Deli production consumption netting); beyond it is an anomaly to investigate.">'+(ig.withinBand?"":"\\u26A0 ")+esc(txt)+'</span>';
+}
 // ---- Department dossier (#dept): /api/dept-dossier ----
 PAGES.dept=function(){var rp=routeParams();if(!rp.dept){setHTML('<div class="card"><div class="muted">Open a department from the League table or Brief.</div></div>');return}
   loading();api("/api/dept-dossier?dept="+encodeURIComponent(rp.dept)+"&from="+encodeURIComponent(rp.from||"")+"&to="+encodeURIComponent(rp.to||"")).then(function(d){
     var s=d.summary;
     var h='<div class="card"><div class="brief-hd"><h1 style="margin:0;font-size:20px">'+esc(d.dept)+' '+esc(d.name||"")+(d.isFreshB?' <span class="tag">Fresh B</span>':'')+'</h1><div class="small muted">'+esc(d.from)+' \\u2192 '+esc(d.to)+'</div></div>'
-      +'<div class="cards kpis" style="margin-top:8px">'+kpi("Sales",Rr0(s.sales),null)+kpi("GP",Rr0(s.gpR),(s.gpPct!=null?s.gpPct+"%":""))+kpi("Waste",Rr0(s.waste),(s.wastePct!=null?s.wastePct+"% of sales":""))+kpi("Shrink",Rr0(s.shrink),(s.shrinkPct!=null?s.shrinkPct+"% of sales":""))+'</div></div>';
-    // GP bridge waterfall
+      +'<div class="cards kpis" style="margin-top:8px">'+kpi("Sales",Rr0(s.sales),null)
+      +kpi("GP",d.marginPending?'<span class="muted">pending</span>':Rr0(s.gpR),d.marginPending?"awaiting Fresh B weekly file":((s.gpPct!=null?s.gpPct+"%":"")+deptBasisNote(d.integrity)))
+      +kpi("Waste",Rr0(s.waste),(s.wastePct!=null?s.wastePct+"% of sales":""))+kpi("Shrink",Rr0(s.shrink),(s.shrinkPct!=null?s.shrinkPct+"% of sales":""))+'</div></div>';
+    // GP bridge waterfall (pending when the week has no Fresh B weekly-FIM file yet)
     var b=d.bridge;
-    h+='<div class="card brief-sec"><h2>GP bridge <span class="muted small">budget \\u2192 actual GP'+(d.isFreshB?' \\u00b7 weekly-FIM margin (Fresh B)':'')+'</span></h2>'+svgWaterfall(b)
-      +'<div class="small muted" style="margin-top:4px">Components reconcile to the rand'+(b.assertionResidual===0?" (\\u2713 ties)":" (residual "+b.assertionResidual+")")+'.</div></div>';
+    if(!b){
+      h+='<div class="card brief-sec"><h2>GP bridge</h2><div class="muted small">Fresh B margin <b>pending</b> \\u2014 no weekly-FIM file loaded for this week. Sales/waste/shrink above are from daily; GP appears once the Tuesday file lands.</div></div>';
+    }else{
+      h+='<div class="card brief-sec"><h2>GP bridge <span class="muted small">budget \\u2192 actual GP'+(d.isFreshB?' \\u00b7 weekly-FIM margin (Fresh B)':'')+'</span></h2>'+svgWaterfall(b)
+        +'<div class="small muted" style="margin-top:4px">Components reconcile to the rand'+(b.assertionResidual===0?" (\\u2713 ties)":" (residual "+b.assertionResidual+")")+'.</div></div>';
+    }
     // Funding / swell panel
     h+='<div class="card brief-sec"><h2>Funding \\u00b7 swell by week <span class="muted small">expected = rate \\u00d7 purchases vs received</span></h2>'
       +'<div class="tablewrap"><table><thead><tr><th>Week</th><th class="num">Rate</th><th class="num">Purchases</th><th class="num">Expected</th><th class="num">Received</th><th class="num">Gap</th></tr></thead><tbody>'

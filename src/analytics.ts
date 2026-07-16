@@ -865,7 +865,17 @@ export function deriveFreshBMarginDate(stocktakeDay: string, fimUploadDay: strin
   return cutoff.toISOString().slice(0, 10);
 }
 
-/** Fresh-B settings (dept set + derived margin cutoff) from app_settings. */
+/**
+ * Fresh-B settings (dept set + derived margin cutoff) from app_settings.
+ *
+ * CANONICAL Fresh B departments = F04 (Deli), F06 (Bakery), F07, F09 (Butchery),
+ * F64, F77 — these are stocktaken weekly, so their margin comes from the dedicated
+ * weekly_freshb export. This is FINAL. Do NOT add F55: it appeared in Fresh B context
+ * only because the old CP-format export mis-scoped it; F55 is NOT stocktake-dependent,
+ * so its DAILY FIM margin is trustworthy and must stay on the normal (resolver) path.
+ * (Nor F10/F68 — they never appear in the real exports.) See memory
+ * pnp-po-monitor-freshb-weekly.
+ */
 export async function getFreshBConfig(
   env: Env,
 ): Promise<{ depts: Set<string>; stocktakeDay: string; fimUploadDay: string; marginDate: string }> {
@@ -875,7 +885,7 @@ export async function getFreshBConfig(
   ).all<{ key: string; value: string }>();
   const m = new Map((rows.results ?? []).map((r) => [r.key, r.value]));
   const depts = new Set(
-    (m.get("fresh_b_depts") ?? "F04,F06,F07,F09,F10,F64,F68,F77")
+    (m.get("fresh_b_depts") ?? "F04,F06,F07,F09,F64,F77") // canonical set — F55 excluded (see above)
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
@@ -890,6 +900,21 @@ export interface FreshBMargin {
   salesZar: number;
   cosZar: number;
   marginPct: number | null;
+}
+
+/**
+ * A Fresh B file-vs-daily sales divergence on a COMPLETE daily week. `expectedPct` is
+ * the dept's known basis allowance (from freshb_expected_gap, e.g. F04 Deli ~6% from
+ * post-stocktake consumption netting) or null; `withinBand` = the gap is within that
+ * allowance (annotate muted) vs beyond it (real anomaly, render red).
+ */
+export interface FreshBIntegrity {
+  deptCode: string;
+  fileSales: number;
+  dailySales: number;
+  deltaPct: number;
+  expectedPct: number | null;
+  withinBand: boolean;
 }
 
 /**
@@ -920,7 +945,7 @@ export async function freshBWeeklyMargin(
   to: string,
 ): Promise<{
   byDept: Map<string, FreshBMargin>;
-  integrity: { deptCode: string; fileSales: number; dailySales: number; deltaPct: number }[];
+  integrity: FreshBIntegrity[];
 }> {
   const rows = await env.DB.prepare(
     `SELECT dept_code,
@@ -943,7 +968,23 @@ export async function freshBWeeklyMargin(
       marginPct: sales > 0 ? Math.round(((sales - cos) / sales) * 1000) / 10 : null,
     });
   }
-  const integrity: { deptCode: string; fileSales: number; dailySales: number; deltaPct: number }[] = [];
+  // Per-dept expected file-vs-daily basis allowance (%). Known, explained differences
+  // (e.g. F04 Deli's post-stocktake consumption netting) are ANNOTATED, not alarmed —
+  // the tripwire should signal anomalies, not known physics. Configurable via
+  // app_settings.freshb_expected_gap (JSON {dept: pct}); defaults to {F04: 6}.
+  let expectedGap: Record<string, number> = { F04: 6 };
+  const gapRow = await env.DB.prepare(
+    `SELECT value FROM app_settings WHERE key='freshb_expected_gap'`,
+  ).first<{ value: string }>();
+  if (gapRow?.value) {
+    try {
+      const parsed = JSON.parse(gapRow.value);
+      if (parsed && typeof parsed === "object") expectedGap = parsed as Record<string, number>;
+    } catch {
+      /* keep default */
+    }
+  }
+  const integrity: FreshBIntegrity[] = [];
   if (byDept.size) {
     const codes = [...byDept.keys()];
     const ph = codes.map(() => "?").join(",");
@@ -970,12 +1011,19 @@ export async function freshBWeeklyMargin(
       const dd = dmap.get(dept);
       if (!dd || dd.days < expectedDays) continue; // daily incomplete → divergence explained
       const delta = dd.sales > 0 ? Math.abs(v.salesZar - dd.sales) / dd.sales : v.salesZar > 0 ? 1 : 0;
-      if (delta > 0.02) {
+      const deltaPct = Math.round(delta * 1000) / 10;
+      const exp = expectedGap[dept];
+      // Known-basis dept (has an expected allowance): surface any real gap, annotated —
+      // muted within band, red beyond. Others: only surface (red) beyond the 2% floor.
+      const surface = exp !== undefined ? deltaPct >= 0.5 : delta > 0.02;
+      if (surface) {
         integrity.push({
           deptCode: dept,
           fileSales: v.salesZar,
           dailySales: Math.round(dd.sales * 100) / 100,
-          deltaPct: Math.round(delta * 1000) / 10,
+          deltaPct,
+          expectedPct: exp ?? null,
+          withinBand: exp !== undefined && deltaPct <= exp,
         });
       }
     }

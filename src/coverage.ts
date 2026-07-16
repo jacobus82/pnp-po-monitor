@@ -42,12 +42,14 @@ function dailyStatus(days: number): { status: string; detail: string } {
 function binaryStatus(present: number, label: string): { status: string; detail: string } {
   return present > 0 ? { status: "green", detail: label } : { status: "red", detail: "missing" };
 }
-// FIM: complete when daily covers the week (≥6 days) OR weekly rows exist (older
-// Fresh-B weekly pattern); partial daily is amber; nothing is red.
+// FIM: reports DAILY day-level coverage so partial weeks are visible (many day-by-day
+// views run on incomplete weeks). Green at ≥6/7 daily; PARTIAL daily (1–5) is amber even
+// when a general weekly also exists — so the incompleteness isn't masked; a weekly with
+// no daily is green (week is covered, just no day-level granularity); nothing is red.
 function fimStatus(fimd: number, fimw: number): { status: string; detail: string } {
   if (fimd >= 6) return { status: "green", detail: fimd + "/7 daily" };
-  if (fimw > 0) return { status: "green", detail: "weekly" + (fimd ? " + " + fimd + "d" : "") };
-  if (fimd >= 1) return { status: "amber", detail: fimd + "/7 daily" };
+  if (fimd >= 1) return { status: "amber", detail: fimd + "/7 daily" + (fimw ? " (+weekly)" : "") };
+  if (fimw > 0) return { status: "green", detail: "weekly (0/7 daily)" };
   return { status: "red", detail: "missing" };
 }
 // Fresh B weekly FIM: the dedicated post-stocktake export, expected each Tuesday for

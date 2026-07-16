@@ -252,7 +252,7 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
   if (!dept || !from || !to) return json({ error: "dept, from and to are required." }, 400);
   const { growthPct, marginPct } = await budgetAssumptions(env);
 
-  const [fim, budgets, names, swellRows, purchByWeek, topArts, anoms, adj] = await Promise.all([
+  const [fim, budgets, names, swellRows, purchByWeek, topArts, anoms, adj, fbm] = await Promise.all([
     fimByDept(env, from, to),
     deptSalesBudgets(env, from, to, growthPct),
     deptNameMap(env),
@@ -290,6 +290,7 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
        ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 20`,
     ).bind(dept, from, to, `${dept} %`).all<{ type: string; severity: string; message: string; detail_json: string | null }>(),
     freshBAdjuster(env, from, to),
+    freshBWeeklyMargin(env, from, to),
   ]);
 
   const dRaw = fim.find((x) => x.dept_code === dept) ?? { dept_code: dept, dept_name: dept, sales: 0, cos: 0, waste: 0, shrink: 0 };
@@ -309,8 +310,11 @@ export async function handleDeptDossier(req: Request, env: Env): Promise<Respons
 
   return json({
     dept, name: nameOf(names, dept, d.dept_name), from, to,
-    isFreshB: /^(F04|F06|F07|F09|F10|F64|F68|F77)$/.test(dept),
+    isFreshB: /^(F04|F06|F07|F09|F64|F77)$/.test(dept), // canonical Fresh B set (F55 excluded)
     marginPending,
+    // Fresh B file-vs-daily basis check for this dept (present only on a complete daily
+    // week that diverges): withinBand → known basis (muted), else anomaly (red).
+    integrity: fbm.integrity.find((i) => i.deptCode === dept) ?? null,
     summary: { sales: r0(d.sales), gpR: marginPending ? null : r0(d.sales - d.cos), gpPct: marginPending ? null : pct(d.sales - d.cos, d.sales), waste: r0(d.waste), wastePct: pct(d.waste, d.sales), shrink: r0(d.shrink), shrinkPct: pct(d.shrink, d.sales) },
     bridge,
     swell,
