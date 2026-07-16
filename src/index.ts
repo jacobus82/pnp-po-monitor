@@ -870,13 +870,22 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
     // for CP files (which drops unmapped CP article codes), else native dept codes — so
     // a handful of unmapped articles don't spuriously fail the Fresh-B-subset test.
     const detectRows = cpMap ? aggregateCpToDept(parsed.rows, cpMap) : parsed.rows;
-    const fileDepts = new Set(
-      detectRows.map((r) => r.deptCode).filter((c): c is string => !!c && c !== "TOTAL"),
-    );
+    // A Fresh B export is one where the Fresh B departments carry essentially ALL the
+    // sales — compared by SALES SHARE, not dept membership, so a few stray zero/near-
+    // zero non-FB dept rows (e.g. empty C-code artifacts the export sometimes emits)
+    // don't disqualify it, while a real full-store weekly (big Grocery/Liquor sales)
+    // still fails. Threshold: non-FB sales must be < 1% of the file total.
+    const nonTotal = detectRows.filter((r) => r.deptCode && r.deptCode !== "TOTAL");
+    const salesOf = (r: (typeof nonTotal)[number]) => Math.abs(Number(r.netSalesZar ?? 0));
+    const totalSales = nonTotal.reduce((s, r) => s + salesOf(r), 0);
+    const nonFbSales = nonTotal
+      .filter((r) => !fbCfg.depts.has(r.deptCode))
+      .reduce((s, r) => s + salesOf(r), 0);
     const isFreshbWeekly =
-      fileDepts.size > 0 &&
-      [...fileDepts].every((c) => fbCfg.depts.has(c)) &&
-      isFullMonSunWeek(parsed.dateFrom, parsed.dateTo);
+      isFullMonSunWeek(parsed.dateFrom, parsed.dateTo) &&
+      totalSales > 0 &&
+      nonFbSales / totalSales < 0.01 &&
+      totalSales - nonFbSales > 0;
     const effectiveReportType = isFreshbWeekly ? "weekly_freshb" : parsed.reportType;
 
     // Period-level dedup: keyed by (range, is-freshb) so a Fresh B weekly file is not
