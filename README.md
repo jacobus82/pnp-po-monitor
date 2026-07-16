@@ -393,3 +393,29 @@ have no basket in the source and stay "—" rather than being back-filled.
 whole-rand rounding (e.g. 2026-07-11: 159 × 2,202 = R350,118 vs FIM R349,641 = +0.14%).
 Resolved FIM store sales come from the `fim_daily` `dept_code='TOTAL'` row (or the sum
 of real depts) — never the sum of *all* rows, which would double-count the TOTAL row.
+
+## Fresh B weekly margin (dedicated post-stocktake source)
+
+Fresh B departments (F04 Deli, F06 Bakery, F07, F09 Butchery, F64, F77) are stocktaken
+weekly, so their daily FIM cost is only trued-up after the stocktake. The general
+daily/weekly FIM therefore carry the **wrong** Fresh B margin. The authoritative source
+is a dedicated **Fresh B FIM export run each Tuesday** for the prior Mon–Sun week,
+detected by content (Fresh B departments carry ≥99% of the file's sales AND a full
+Mon–Sun range) and stored `report_type='weekly_freshb'` (coexists with daily/general
+rows via the `(date_from,date_to,dept_code,report_type)` key). `freshBWeeklyMargin()`
+in `analytics.ts` is the only reader; `weekly_freshb` is excluded from every other FIM
+aggregation. Filenames must carry a parseable date range (`06.07.2026 - 12.07.2026`);
+CP-format exports are mapped CP→dept before detection.
+
+**Sales / GP convention** (after investigating the file-vs-daily gap):
+- Fresh B **weekly GP% and GP rand** take *both* sales and cos from the weekly file, so
+  GP% equals the file exactly. A dept with no file for the week shows **pending** —
+  never a daily/general-weekly margin.
+- **Daily / intra-week** displays use daily rows.
+- The weekly **store roll-up** = Fresh B (file) + non-Fresh-B (resolver/daily).
+
+The file is authoritative because the daily FIM is sparse and often incomplete; when
+daily is complete the two match to the rand for most depts. The `freshBIntegrity`
+tripwire flags a dept only when the daily week is **complete** and still diverges >2%
+(a genuine basis difference — e.g. F04 Deli runs ~5% below daily from post-stocktake
+consumption netting), not when the gap is merely missing daily days.

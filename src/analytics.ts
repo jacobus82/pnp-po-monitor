@@ -898,9 +898,21 @@ export interface FreshBMargin {
  * stocktake cost, so they are NEVER used for Fresh B margin. Sums the weekly_freshb
  * rows overlapping [from,to] per Fresh B dept. A dept with NO weekly_freshb row for
  * the window is absent from the map → the caller must treat it as PENDING (never
- * fall back to daily/general-weekly). `integrity` flags depts whose file weekly
- * sales diverge >2% from the daily FIM sum for the same range (daily stays
- * authoritative for daily/quantity views).
+ * fall back to daily/general-weekly).
+ *
+ * SALES/GP CONVENTION (decided after investigating the file-vs-daily gap):
+ *   (a) Fresh B WEEKLY GP% / GP rand — sales AND cos both come from the weekly_freshb
+ *       FILE (never mixed with daily), so GP% equals the file exactly.
+ *   (b) DAILY / intra-week displays (day-by-day panels) — daily rows.
+ *   (c) Weekly STORE roll-up where both exist — Fresh B from the FILE, non-Fresh-B
+ *       from the resolver/daily.
+ * The weekly file is AUTHORITATIVE for the Fresh B week because the daily FIM is
+ * sparse and often incomplete (missing days; no daily history for some weeks; F77 has
+ * no daily rows at all), while the file is the complete post-stocktake truth. When
+ * daily IS complete they match to the rand for most depts — F09/F06/F07 gaps ~0%.
+ * `integrity` is the TRIPWIRE: it flags a dept only when daily is COMPLETE for the
+ * window and STILL diverges >2% (a real basis difference, e.g. F04 Deli ~5% under),
+ * NOT when the gap is merely missing daily days.
  */
 export async function freshBWeeklyMargin(
   env: Env,
@@ -936,21 +948,33 @@ export async function freshBWeeklyMargin(
     const codes = [...byDept.keys()];
     const ph = codes.map(() => "?").join(",");
     const daily = await env.DB.prepare(
-      `SELECT dept_code, COALESCE(SUM(net_sales_zar),0) AS sales FROM fim_daily
+      `SELECT dept_code, COALESCE(SUM(net_sales_zar),0) AS sales,
+              COUNT(DISTINCT date_from) AS days FROM fim_daily
         WHERE report_type = 'daily' AND dept_code IN (${ph})
           AND date_from >= ? AND date_to <= ? GROUP BY dept_code`,
     )
       .bind(...codes, from, to)
-      .all<{ dept_code: string; sales: number }>();
-    const dmap = new Map((daily.results ?? []).map((d) => [d.dept_code, Number(d.sales)]));
+      .all<{ dept_code: string; sales: number; days: number }>();
+    const dmap = new Map(
+      (daily.results ?? []).map((d) => [d.dept_code, { sales: Number(d.sales), days: Number(d.days) }]),
+    );
+    // The gap only counts as an INTEGRITY issue when the daily feed is COMPLETE for the
+    // window (all days present) and STILL diverges >2% — a genuine basis difference
+    // (e.g. F04 Deli's post-stocktake consumption netting runs ~5% under the daily POS
+    // sum). When daily is incomplete — missing days, or none loaded (the daily FIM is
+    // sparse: ~43 days over 4.5 months) — the divergence is explained by data
+    // completeness, not a mismatch, so it is NOT flagged; the weekly file is
+    // authoritative either way. Depts absent from daily entirely (e.g. F77) never flag.
+    const expectedDays = Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000) + 1;
     for (const [dept, v] of byDept) {
-      const ds = dmap.get(dept) ?? 0;
-      const delta = ds > 0 ? Math.abs(v.salesZar - ds) / ds : v.salesZar > 0 ? 1 : 0;
+      const dd = dmap.get(dept);
+      if (!dd || dd.days < expectedDays) continue; // daily incomplete → divergence explained
+      const delta = dd.sales > 0 ? Math.abs(v.salesZar - dd.sales) / dd.sales : v.salesZar > 0 ? 1 : 0;
       if (delta > 0.02) {
         integrity.push({
           deptCode: dept,
           fileSales: v.salesZar,
-          dailySales: Math.round(ds * 100) / 100,
+          dailySales: Math.round(dd.sales * 100) / 100,
           deltaPct: Math.round(delta * 1000) / 10,
         });
       }
