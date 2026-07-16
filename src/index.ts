@@ -859,9 +859,18 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
     // 'weekly_freshb' so freshBWeeklyMargin() sources margin/COS exclusively from it
     // (the general weekly/daily FIM carry the wrong Fresh B cost). Mixed-dept weekly
     // files stay general 'weekly'.
+    //
+    // CP (Category-Portfolio) files key rows by CP code, not SAP dept — the FIM daily
+    // AND weekly exports use this format — so resolve to SAP depts FIRST (via the same
+    // cpToDeptMap the storage path uses), else an FB export in CP format would be
+    // misclassified as a general weekly and silently ignored for FB margin.
+    const cpMap = parsed.isCpFormat ? await cpToDeptMap(env) : null;
+    const toDept = (code: string): string => (cpMap ? cpMap.get(code)?.deptCode ?? code : code);
     const fbCfg = await getFreshBConfig(env);
     const fileDepts = new Set(
-      parsed.rows.map((r) => r.deptCode).filter((c): c is string => !!c && c !== "TOTAL"),
+      parsed.rows
+        .map((r) => (r.deptCode ? toDept(r.deptCode) : r.deptCode))
+        .filter((c): c is string => !!c && c !== "TOTAL"),
     );
     const isFreshbWeekly =
       fileDepts.size > 0 &&
@@ -900,8 +909,7 @@ async function handleFimUpload(req: Request, env: Env): Promise<Response> {
     let cpStats:
       | { cpRowsParsed: number; articlesParsed: number; cpsMapped: number; cpsUnmapped: string[] }
       | undefined;
-    if (parsed.isCpFormat) {
-      const cpMap = await cpToDeptMap(env);
+    if (parsed.isCpFormat && cpMap) {
       articleRows = parsed.articles.map((a) => ({ ...a, deptCode: cpMap.get(a.deptCode)?.deptCode ?? a.deptCode }));
       const mapped = new Set<string>();
       const unmapped = new Set<string>();
