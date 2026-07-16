@@ -105,7 +105,7 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
   const from = q.get("from"), to = q.get("to");
   if (!from || !to) return json({ error: "from and to are required." }, 400);
 
-  const [fim, lyFim, gr, swell, budget, names, adj] = await Promise.all([
+  const [fim, lyFim, gr, swell, budget, names, adj, fbm] = await Promise.all([
     fimByDept(env, from, to),
     fimByDept(env, lyShift(from), lyShift(to)),
     grByDept(env, from, to),
@@ -113,6 +113,7 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
     budgetByDept(env, from, to),
     deptNameMap(env),
     freshBAdjuster(env, from, to),
+    freshBWeeklyMargin(env, from, to),
   ]);
   const lyByDept = new Map(lyFim.map((d) => [d.dept_code, d]));
   // Fresh B depts: sales/cos come from the weekly_freshb file (GP% = file exactly) or
@@ -123,6 +124,7 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
   });
   const storeSales = adjusted.reduce((s, d) => s + d.sales, 0);
   const storeGp = adjusted.reduce((s, d) => (d.pending ? s : s + (d.sales - d.cos)), 0);
+  const igMap = new Map(fbm.integrity.map((i) => [i.deptCode, i]));
 
   const rows = adjusted.filter((d) => d.sales !== 0 || (gr.get(d.dept_code) ?? 0) !== 0).map((d) => {
     const gp = d.pending ? null : d.sales - d.cos;
@@ -147,6 +149,7 @@ export async function handleDeptLeague(req: Request, env: Env): Promise<Response
       // Default sort key: GP contribution variance vs LY (biggest GP loss first).
       gpVarVsLy: gp == null || lyGp == null ? null : r0(gp - lyGp), lyGpPct: lyGp == null || !ly ? null : pct(lyGp, ly.sales),
       marginPending: d.pending,
+      integrity: igMap.get(d.dept_code) ?? null,
     };
   });
   rows.sort((a, b) => (a.gpVarVsLy ?? Infinity) - (b.gpVarVsLy ?? Infinity));

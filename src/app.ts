@@ -762,12 +762,21 @@ function grFimSection(gr,fim){
   } else grCard+='<div class="muted small">No goods receipts overlapping this period.</div>';
   grCard+='</div>';
   var fd=(fim&&fim.departments)||[];
-  var sales=0,cos=0;fd.forEach(function(d){sales+=d.salesZar||0;cos+=d.cosZar||0});
+  // Net sales is all depts (quantity); Margin is over depts with a KNOWN margin —
+  // pending Fresh B (no weekly stocktake file yet) is excluded so its wrong daily cost
+  // doesn't distort the aggregate. A pending count + basis flags are surfaced.
+  var salesAll=0;fd.forEach(function(d){salesAll+=d.salesZar||0});
+  var known=fd.filter(function(d){return !d.marginPending});
+  var pend=fd.filter(function(d){return d.marginPending});
+  var ks=0,kc=0;known.forEach(function(d){ks+=d.salesZar||0;kc+=d.cosZar||0});
+  var ig=(fim&&fim.freshBIntegrity)||[];var igBeyond=ig.filter(function(x){return !x.withinBand});
   var fimCard='<div class="card"><h2>FIM margins (sales this period)</h2>';
   if(fd.length){
-    var marg=sales>0?Math.round((sales-cos)/sales*1000)/10:null;
-    fimCard+='<div class="cards kpis">'+kpi("Net sales",Rr0(sales),null)+kpi("Margin",pct(marg),null)
+    var marg=ks>0?Math.round((ks-kc)/ks*1000)/10:null;
+    fimCard+='<div class="cards kpis">'+kpi("Net sales",Rr0(salesAll),null)+kpi("Margin",pct(marg),(pend.length?"excl. "+pend.length+" pending":null))
       +kpi("Waste",Rr0(fd.reduce(function(a,d){return a+(d.wasteZar||0)},0)),null)+kpi("Departments",num(fd.length),null)+'</div>';
+    if(pend.length)fimCard+='<div class="small neg" style="margin-top:4px">\\u26A0 Fresh B margin pending for '+esc(pend.map(function(d){return d.deptCode}).join(", "))+' \\u2014 awaiting the weekly stocktake file.</div>';
+    if(igBeyond.length)fimCard+='<div class="small neg" style="margin-top:2px">\\u26A0 File-vs-daily basis beyond expected: '+esc(igBeyond.map(function(x){return x.deptCode+" "+x.deltaPct+"%"}).join(", "))+'.</div>';
     fimCard+='<div style="margin-top:6px">'+hbars(fd.slice(0,8).map(function(d){return {label:d.deptCode+" "+(d.deptName||""),value:d.salesZar||0}}),null,Rr0)+'</div>';
   } else fimCard+='<div class="muted small">No FIM reports cover this period. Load FIM via Upload Files.</div>';
   fimCard+='</div>';
@@ -2443,12 +2452,14 @@ function dlRender(){
   rows.sort(function(a,b){var x=a[_dlSort],y=b[_dlSort];if(x==null)x=-1e15;if(y==null)y=-1e15;return (x<y?-1:x>y?1:0)*_dlDir});
   function th(k,lab){return '<th class="num" style="cursor:pointer" onclick="dlSortBy(\\''+k+'\\')">'+lab+(_dlSort===k?(_dlDir>0?" \\u25B4":" \\u25BE"):"")+'</th>'}
   var st=d.store;
-  var head='<div class="card"><div class="brief-hd"><h2 style="margin:0">Department league <span class="muted small">'+esc(d.from)+' \\u2192 '+esc(d.to)+' \\u00b7 LY '+esc(d.lyFrom)+'</span></h2><div class="small muted">Store sales '+Rr0(st.sales)+' \\u00b7 GP '+Rr0(st.gpR)+' ('+st.gpPct+'%)</div></div></div>';
+  var fbP=(st.freshBPending||[]);
+  var pendNote=fbP.length?' \\u00b7 <span class="neg" title="Fresh B departments with no weekly stocktake file for this week \\u2014 GP excludes them until the Tuesday file lands">'+fbP.length+' Fresh B pending ('+esc(fbP.join(", "))+')</span>':'';
+  var head='<div class="card"><div class="brief-hd"><h2 style="margin:0">Department league <span class="muted small">'+esc(d.from)+' \\u2192 '+esc(d.to)+' \\u00b7 LY '+esc(d.lyFrom)+'</span></h2><div class="small muted">Store sales '+Rr0(st.sales)+' \\u00b7 GP '+Rr0(st.gpR)+' ('+st.gpPct+'%)'+pendNote+'</div></div></div>';
   var tbl='<div class="card" style="margin-top:12px"><div class="muted small" style="margin-bottom:6px">Click a column to sort \\u00b7 default worst GP-vs-LY first \\u00b7 click a row for the dossier</div><div class="tablewrap"><table><thead><tr><th>Dept</th>'
     +th("sales","Sales")+th("sharePct","Share")+th("growthPct","Growth LY")+th("gpPct","GP%")+th("gpR","GP R")+th("gpSharePct","GP share")+th("wastePct","Waste%")+th("shrinkPct","Shrink%")+th("grPurchases","GR purch")+th("purchToSales","P:S")+th("swell","Swell")+th("swellPctOfPurch","Swell%")+th("budgetVarPct","Bud var")+th("gpVarVsLy","GP\\u0394LY")+'</tr></thead><tbody>'
     +rows.map(function(r){return '<tr data-drill="dept?dept='+esc(r.dept)+'&from='+esc(d.from)+'&to='+esc(d.to)+'" style="cursor:pointer"><td class="small"><b>'+esc(r.dept)+'</b> '+esc(r.name||"")+'</td>'
       +'<td class="num">'+Rr0(r.sales)+'</td><td class="num">'+(r.sharePct!=null?r.sharePct+"%":"\\u2014")+'</td><td class="num">'+gcell(r.growthPct)+'</td>'
-      +'<td class="num">'+(r.gpPct!=null?r.gpPct+"%":"\\u2014")+'</td><td class="num">'+Rr0(r.gpR)+'</td><td class="num">'+(r.gpSharePct!=null?r.gpSharePct+"%":"\\u2014")+'</td>'
+      +'<td class="num">'+(r.marginPending?'<span class="muted" title="Fresh B margin pending \\u2014 awaiting the weekly stocktake file">pending</span>':((r.gpPct!=null?r.gpPct+"%":"\\u2014")+basisMark(r.integrity)))+'</td><td class="num">'+(r.marginPending?"\\u2014":Rr0(r.gpR))+'</td><td class="num">'+(r.gpSharePct!=null?r.gpSharePct+"%":"\\u2014")+'</td>'
       +'<td class="num">'+pcell(r.wastePct,r.overWaste)+'</td><td class="num">'+pcell(r.shrinkPct,r.overShrink)+'</td>'
       +'<td class="num">'+Rr0(r.grPurchases)+'</td><td class="num'+(r.overPurch?" neg":"")+'">'+(r.purchToSales!=null?r.purchToSales:"\\u2014")+'</td>'
       +'<td class="num">'+Rr0(r.swell)+'</td><td class="num">'+(r.swellPctOfPurch!=null?r.swellPctOfPurch+"%":"\\u2014")+'</td>'
@@ -2457,6 +2468,13 @@ function dlRender(){
   el.innerHTML=head+tbl;
 }
 
+// Compact Fresh B basis marker for tables: muted "·" within the expected band, red "⚠"
+// beyond, with the detail on hover. (deptBasisNote is the verbose KPI-sub version.)
+function basisMark(ig){
+  if(!ig)return "";
+  var t='daily basis '+(ig.deltaPct>0?"+":"")+ig.deltaPct+'%'+(ig.expectedPct!=null?' (expected \\u2264'+ig.expectedPct+'%)':'');
+  return ' <span class="'+(ig.withinBand?"muted":"neg")+'" title="'+esc(t)+'" style="cursor:help">'+(ig.withinBand?"\\u00b7":"\\u26A0")+'</span>';
+}
 // Fresh B file-vs-daily basis annotation for a dept's GP: muted when the divergence is
 // within the known expected band (e.g. F04 Deli production netting), red (anomaly) when
 // beyond it. Empty when there's no complete-week divergence.
@@ -2552,13 +2570,14 @@ function briefLoad(){
     var t=d.trading,ts=t.store;
     h+='<div class="card brief-sec"><h2>1 \\u00b7 Trading <span class="muted small">sales vs budget \\u00b7 '+esc(t.budgetSource)+'</span></h2>';
     if(!t.complete)h+=briefWarn("FIM incomplete for this week ("+(cov.fim&&cov.fim.detail||"")+") \\u2014 sales figures are partial.");
+    if(ts.freshBPending&&ts.freshBPending.length)h+=briefWarn(ts.freshBPending.length+" Fresh B dept(s) pending ("+esc(ts.freshBPending.join(", "))+") \\u2014 store GP% excludes them until the weekly stocktake file lands.");
     h+='<div class="cards kpis">'
       +clikKpiB("Store sales",Rr0(ts.sales),vpct(ts.variancePct)+" vs budget "+Rr0(ts.budget),"trading")
       +clikKpiB("GP %",(ts.gpPct!=null?ts.gpPct+"%":"\\u2014"),(ts.gpDeltaPp!=null?(ts.gpDeltaPp>=0?"+":"")+ts.gpDeltaPp+"pp vs "+ts.requiredMarginPct+"% req":""),"ima")
       +clikKpiB("Variance",Rr0(ts.varianceZar),(ts.varianceZar>=0?"over":"under")+" budget","trading")
       +clikKpiB("vs LY",vpct(ts.lyVarPct),"LY "+Rr0(ts.lySales),"trading")+'</div>';
     h+='<div class="tablewrap" style="margin-top:8px"><table><thead><tr><th>Dept</th><th class="num">Sales</th><th class="num">Budget</th><th class="num">Var</th><th class="num">Var%</th><th class="num">GP%</th><th class="num">vs LY</th></tr></thead><tbody>'
-      +(t.depts||[]).map(function(x){return '<tr data-drill="dept?dept='+esc(x.dept)+'&from='+esc(w.weekStart)+'&to='+esc(w.weekEnd)+'" style="cursor:pointer"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.gpPct!=null?x.gpPct+"%":"\\u2014")+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
+      +(t.depts||[]).map(function(x){return '<tr data-drill="dept?dept='+esc(x.dept)+'&from='+esc(w.weekStart)+'&to='+esc(w.weekEnd)+'" style="cursor:pointer"><td class="small">'+esc(x.dept)+' '+esc(x.name||"")+'</td><td class="num">'+Rr0(x.sales)+'</td><td class="num">'+Rr0(x.budget)+'</td><td class="num '+(x.varianceZar<0?"neg":"pos")+'">'+Rr0(x.varianceZar)+'</td><td class="num">'+vpct(x.variancePct)+'</td><td class="num">'+(x.marginPending?'<span class="muted" title="Fresh B margin pending \\u2014 awaiting weekly stocktake file">pending</span>':(x.gpPct!=null?x.gpPct+"%":"\\u2014"))+'</td><td class="num">'+vpct(x.lyVarPct)+'</td></tr>'}).join("")
       +'</tbody></table></div></div>';
 
     // ===== GP BRIDGE (waterfall) =====
