@@ -2378,6 +2378,7 @@ export default {
     const path = url.pathname.replace(/\/+$/, "") || "/";
     const m = req.method;
 
+    const res: Response = await (async (): Promise<Response> => {
     try {
       if ((path === "/" || path === "/app") && m === "GET") {
         return new Response(APP_HTML, {
@@ -2721,5 +2722,11 @@ export default {
         500,
       );
     }
+    })();
+    // Data/API endpoints are per-request D1 queries — never let the Cloudflare edge or
+    // the browser serve them stale after an upload. Static HTML/JS/img above set their
+    // own cache-control and are unaffected. no-store also stops any heuristic caching.
+    if (path.startsWith("/api/")) res.headers.set("cache-control", "no-store");
+    return res;
   },
 } satisfies ExportedHandler<Env>;
