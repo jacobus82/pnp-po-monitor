@@ -21,6 +21,16 @@ BUDGET_OVER_THRESHOLD = "1.00"
 [observability]
 enabled = true
 
+# --- Nightly reconciliation ---
+# 01:30 UTC = 03:30 SAST: after the day's uploads, before anyone opens the
+# dashboard. Runs runReconcilePass() in src/index.ts — receipt rollups + the
+# detectors that cannot fire at insert time (STALE_OPEN_ORDER, PRICE_SPIKE,
+# OVER_BUDGET, OTB_EXCEEDED). PO uploads default to the fast path and skip all
+# of this; before this trigger existed the pass only ran if someone manually
+# POSTed /api/reconcile/recompute, so PRICE_SPIKE never fired in production.
+[triggers]
+crons = ["30 1 * * *"]
+
 # --- D1 (relational store: uploads, po_lines, vendors, articles, anomalies, budgets) ---
 # Run `npm run db:create`, then paste the returned database_id below.
 [[d1_databases]]

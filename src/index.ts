@@ -2425,7 +2425,54 @@ async function handleListStatements(env: Env): Promise<Response> {
 
 // --- router --------------------------------------------------------------
 
+/**
+ * The end-of-load reconciliation pass: receipt rollups, then every detector whose
+ * finding cannot be known at insert time (staleness is time-based; price spikes
+ * need the article's baseline vs its latest price; budget/OTB need the week's
+ * totals). Shared by POST /api/reconcile/recompute and the nightly cron so the
+ * two can never drift.
+ *
+ * This exists as a scheduled pass because PO uploads default to the FAST path,
+ * which deliberately skips all post-insert work (its cost grows with table size
+ * and 503s on large slice loads). Detection therefore has to happen once, after
+ * the load — not per upload, which would repeat a full po_lines scan per slice.
+ */
+export async function runReconcilePass(env: Env): Promise<{
+  staleAnomalies: number;
+  priceSpikes: { seeded: boolean; raised: number };
+  otbExceeded: number;
+  budget: unknown[];
+}> {
+  await recomputeReceipts(env);
+  const staleAnomalies = await recomputeStaleAnomalies(env);
+  // Price-spike pass (fast-path uploads never advance the price baseline).
+  const priceSpikes = await recomputePriceSpikes(env);
+  // Re-evaluate the current-week PO budget (fast-path uploads skip this).
+  const budget = await evaluateBudgets(env, 0);
+  try {
+    await insertAnomalies(env, null, budget.anomalies);
+  } catch {
+    /* budget anomaly write is best-effort; rollups already committed */
+  }
+  const otbExceeded = await recomputeOtbAnomalies(env);
+  return { staleAnomalies, priceSpikes, otbExceeded, budget: budget.evaluations };
+}
+
 export default {
+  /**
+   * Nightly reconcile (see [triggers] crons in wrangler.toml). Without this the
+   * pass only ran if someone manually POSTed the admin endpoint — which is why
+   * PRICE_SPIKE had not fired in production since the 2024 bulk load.
+   */
+  async scheduled(_controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      runReconcilePass(env).then(
+        (r) => console.log("[cron] reconcile ok", JSON.stringify(r)),
+        (e) => console.error("[cron] reconcile failed", e instanceof Error ? e.message : String(e)),
+      ),
+    );
+  },
+
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
     const path = url.pathname.replace(/\/+$/, "") || "/";
@@ -2585,19 +2632,7 @@ export default {
       if (path === "/api/gpbridge" && m === "GET") return await handleGpBridge(req, env);
       if (path === "/api/reconcile/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
-        await recomputeReceipts(env);
-        const staleAnomalies = await recomputeStaleAnomalies(env);
-        // Price-spike pass (fast-path uploads never advance the price baseline).
-        const priceSpikes = await recomputePriceSpikes(env);
-        // Re-evaluate the current-week PO budget (fast-path uploads skip this).
-        const budget = await evaluateBudgets(env, 0);
-        try {
-          await insertAnomalies(env, null, budget.anomalies);
-        } catch {
-          /* budget anomaly write is best-effort; rollups already committed */
-        }
-        const otbExceeded = await recomputeOtbAnomalies(env);
-        return json({ status: "ok", recomputed: true, staleAnomalies, priceSpikes, otbExceeded, budget: budget.evaluations });
+        return json({ status: "ok", recomputed: true, ...(await runReconcilePass(env)) });
       }
       if (path === "/api/anomalies/recompute" && m === "POST") {
         if (!adminAuthorized(req, env)) return json({ error: "Unauthorized" }, 401);
