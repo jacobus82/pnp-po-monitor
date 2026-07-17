@@ -1,4 +1,5 @@
 import type { Env } from "../config";
+import { fillAnomalyRefDates } from "../anomalies/window";
 import type { EodRow } from "../parser/eodParser";
 import type { FiscalCalendar } from "../fiscal";
 import type {
@@ -414,6 +415,8 @@ export async function insertAnomalies(
       ),
     );
   }
+  // Stamp ref_date on the rows just written — the window/aged-out surfaces read it.
+  await fillAnomalyRefDates(env);
 }
 
 /** Bulk-insert goods-receipt lines for one upload (batched). */

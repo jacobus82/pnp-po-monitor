@@ -2306,14 +2306,27 @@ function anomTableHTML(list,showAck,emptyNote){
   }).join("");
   return '<div class="tablewrap"><table><thead><tr><th>Sev</th><th>Type</th><th>Detail / suggested action</th><th>Date</th><th></th></tr></thead><tbody>'+rows+'</tbody></table></div>';
 }
+// Defaults to the relevance window (app_settings.anomaly_window_weeks, 12): only
+// anomalies whose business refDate is recent enough to still be worth acting on.
+// Older unresolved items are AGED_OUT — one click away via the toggle, never
+// deleted. The toggle always shows its count so the hidden volume stays visible.
 PAGES.anomalies=function(){
-  setHTML('<div class="toolbar"><select class="sel" id="asev"><option value="">All severities</option><option>CRITICAL</option><option>WARN</option><option>INFO</option></select><label class="small"><input type="checkbox" id="aack"> show acknowledged</label><span class="small muted">Rows with <span class="link">open \\u2192</span> drill to the evidence.</span></div><div id="abody"><div class="loading">Loading\\u2026</div></div>');
-  function load(){var sev=$("asev").value;var showAck=$("aack").checked;
-    api("/api/anomalies/scoped?limit=500"+(sev?"&severity="+sev:"")+(showAck?"":"&resolved=false")).then(function(d){
-      var list=d.anomalies||[];
-      $("abody").innerHTML='<div class="card"><h2>Risk & anomalies ('+list.length+')</h2>'+anomTableHTML(list,true,"")+'</div>';
+  setHTML('<div class="toolbar"><select class="sel" id="asev"><option value="">All severities</option><option>CRITICAL</option><option>WARN</option><option>INFO</option></select><label class="small"><input type="checkbox" id="aack"> show acknowledged</label><label class="small"><input type="checkbox" id="aold"> older / aged out <span id="aoldn" class="muted"></span></label><span class="small muted">Rows with <span class="link">open \\u2192</span> drill to the evidence.</span></div><div id="abody"><div class="loading">Loading\\u2026</div></div>');
+  function load(){var sev=$("asev").value;var showAck=$("aack").checked;var old=$("aold").checked;
+    api("/api/anomalies/scoped?limit=500"+(sev?"&severity="+sev:"")+(showAck?"":"&resolved=false")+(old?"&aged=true":"")).then(function(d){
+      var list=d.anomalies||[];var w=d.window||{};
+      var n=w.olderCount||0;
+      $("aoldn").textContent=n?"("+n+")":"";
+      var title=old
+        ? "Aged out \\u2014 older than "+(w.weeks||12)+" weeks ("+list.length+")"
+        : "Risk & anomalies ("+list.length+")";
+      var note=old
+        ? '<div class="small muted" style="margin-bottom:8px">Unresolved items dated before '+esc(w.cutoff||"")+'. Kept for the record, out of the working list and excluded from the dashboard tile and Brief counts.</div>'
+        : '<div class="small muted" style="margin-bottom:8px">Last '+(w.weeks||12)+' fiscal weeks (from '+esc(w.cutoff||"")+'), by the date each finding is about.'
+          +(n?' <a class="link" href="#" onclick="document.getElementById(\\'aold\\').checked=true;window._reloadAnom();return false">'+n+' older anomalies \\u2192</a>':'')+'</div>';
+      $("abody").innerHTML='<div class="card"><h2>'+title+'</h2>'+note+anomTableHTML(list,true,old?"aged out":"in the last "+(w.weeks||12)+" weeks")+'</div>';
     }).catch(function(e){$("abody").innerHTML='<div class="err">'+esc(e.message)+'</div>'})}
-  $("asev").onchange=load;$("aack").onchange=load;load();window._reloadAnom=load;
+  $("asev").onchange=load;$("aack").onchange=load;$("aold").onchange=load;load();window._reloadAnom=load;
 };
 function ackAnom(e,id){e.stopPropagation();fetch("/api/anomalies/"+id+"/ack",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({resolved:true})}).then(function(){if(window._reloadAnom)window._reloadAnom()})}
 
@@ -2893,10 +2906,11 @@ PAGES.settings=function(){loading();Promise.all([api("/api/settings"),api("/api/
     +f("vencor_terms_days","Vencor payment terms","days (14)")
     +f("pnp_terms_days","PnP Corporate payment terms","days after week-end (28)")
     +f("open_po_max_age_days","Auto-close open POs after","days (default 90 \\u2014 older open lines drop off Open/Committed)")
+    +f("anomaly_window_weeks","Anomaly relevance window","fiscal weeks (default 12) \\u2014 older unresolved anomalies age out of the Risk page, dashboard tile &amp; Brief counts")
     +'<div class="hbar" style="grid-template-columns:240px 1fr;align-items:start"><span class="lab">Department friendly names</span><textarea class="inp" id="set_dept_names" rows="4" style="width:100%;font-family:monospace;font-size:11px" placeholder=\\'{"G12":"Groceries","F09":"Butchery"}\\'>'+esc(s.dept_names||"")+'</textarea></div>'
     +'<div class="small muted">JSON map of SAP dept code \\u2192 friendly name, used across the League, GP bridge &amp; dossier.</div>'
     +'<div style="margin-top:10px"><button class="btn" onclick="saveSettings()">Save settings</button> <span id="set_msg" class="small muted"></span></div></div>';
-  window._setKeys=["monthly_turnover_target","target_gp_pct","budget_growth_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days","dept_names"];
+  window._setKeys=["monthly_turnover_target","target_gp_pct","budget_growth_pct","weekly_cap","monthly_salary_zar","price_alert_threshold_pct","fy_start_month","vencor_terms_days","pnp_terms_days","open_po_max_age_days","anomaly_window_weeks","dept_names"];
   var gl='<div class="card" style="margin-top:14px"><h2>Department guideline margins</h2>'+makeTable([
     {key:"dept_code",label:"Dept"},{key:"dept_name",label:"Name"},{key:"dept_group",label:"Group"},
     {key:"guideline_margin_pct",label:"Guideline %",num:true,html:function(r){return '<input class="inp" style="width:80px;text-align:right" value="'+r.guideline_margin_pct+'" onchange="saveGuideline(\\''+r.dept_code+'\\',this.value)">'}},

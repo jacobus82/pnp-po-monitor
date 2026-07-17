@@ -6,6 +6,7 @@
  * source hints. Default week = the last completed fiscal week.
  */
 import { type Env } from "./config";
+import { inWindowInlineSql } from "./anomalies/window";
 import { computePaymentsDue } from "./statements-analytics";
 import { weekCoverage } from "./coverage";
 import { gpBridge as deptGpBridge, freshBAdjuster } from "./dept";
@@ -88,7 +89,9 @@ export async function handleWeeklyBrief(req: Request, env: Env): Promise<Respons
       FROM return_credits WHERE status!='CREDITED' AND return_value<0`).bind(code).first<{ n: number; total: number; wkN: number; wkTotal: number }>(),
     env.DB.prepare(`SELECT nps_tw, nps_computed FROM fan_score_weeks WHERE week_ending BETWEEN ? AND ?`).bind(ws, we).first<{ nps_tw: number | null; nps_computed: number | null }>(),
     env.DB.prepare(`SELECT COALESCE(SUM(l.amount),0) amt, COUNT(*) n FROM statement_lines l JOIN statements s ON s.statement_no=l.statement_no WHERE lower(l.vendor_text) LIKE '%interest%' AND s.cut_off BETWEEN ? AND ?`).bind(ws, we).first<{ amt: number; n: number }>(),
-    env.DB.prepare(`SELECT COUNT(*) n FROM anomalies WHERE resolved=0`).first<{ n: number }>(),
+    // Watch count is a rollup, so it obeys the relevance window (aged-out items
+    // are excluded) — matching the Risk page's default list and the dashboard tile.
+    env.DB.prepare(`SELECT COUNT(*) n FROM anomalies a WHERE a.resolved=0 AND ${inWindowInlineSql()}`).first<{ n: number }>(),
     // POs placed this week (net S001-S002, cents) — for the dashboard "this week so far".
     env.DB.prepare(`SELECT COALESCE(SUM(CASE WHEN COALESCE(sloc,'')='S002' THEN -COALESCE(line_value_cents,0) ELSE COALESCE(line_value_cents,0) END),0) v FROM po_lines WHERE order_date BETWEEN ? AND ?`).bind(ws, we).first<{ v: number }>(),
     // 4-week waste% trend per dept (weeks ending at the selected week).

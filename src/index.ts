@@ -7,6 +7,7 @@ import { handleStatementDashboard, handleStatementBrowse } from "./statements-an
 import { handleFeedCoverage } from "./coverage";
 import { handleWeeklyBrief } from "./brief";
 import { handleOtb, recomputeOtbAnomalies } from "./otb";
+import { anomalyWindow, inWindowSql, agedOutSql, inWindowInlineSql } from "./anomalies/window";
 import { handleDeptLeague, handleDeptDossier, handleGpBridge } from "./dept";
 import { parseFimFile, aggregateCpToDept } from "./parser/fimParser";
 import { parseCustomerFile } from "./parser/customerParser";
@@ -1350,22 +1351,38 @@ function deriveAnomalyDrill(
 }
 
 /**
- * GET /api/anomalies/scoped?from=&to=&resolved=&limit= — anomalies enriched with a
- * business reference date and a drill-through hash (Brief 4). When from/to are
- * given, only anomalies whose refDate falls in the window are returned (fixes the
- * weekly view showing the latest anomalies regardless of the selected week).
+ * GET /api/anomalies/scoped?from=&to=&resolved=&severity=&aged=&limit= — anomalies
+ * enriched with a business reference date and a drill-through hash (Brief 4).
+ *
+ * Three modes:
+ *  - from/to given  → WEEK-SCOPED. Returns exactly that period, no relevance
+ *    window (the Weekly view and Brief already scope themselves; unaffected).
+ *  - aged=true      → the AGED_OUT backlog: unresolved items whose refDate is
+ *    older than the window cutoff. The page's "Older / aged out" toggle.
+ *  - default        → the working list: refDate inside the last
+ *    `anomaly_window_weeks` fiscal weeks. `olderCount` reports what is hidden.
  */
 async function handleScopedAnomalies(req: Request, env: Env): Promise<Response> {
   const q = new URL(req.url).searchParams;
   const from = q.get("from");
   const to = q.get("to");
+  const weekScoped = !!(from && to);
+  const aged = q.get("aged") === "true";
   const where: string[] = [];
   const binds: unknown[] = [];
   if (q.get("resolved")) { where.push("a.resolved = ?"); binds.push(q.get("resolved") === "true" ? 1 : 0); }
   if (q.get("severity")) { where.push("a.severity = ?"); binds.push(q.get("severity")); }
   const limit = Math.min(Number(q.get("limit") ?? "60"), 500);
 
-  const [rowsRes, weeksRes] = await Promise.all([
+  // The relevance window governs the GLOBAL page only — never a week-scoped view.
+  const win = await anomalyWindow(env);
+  const olderWhere = [...where, agedOutSql()];
+  if (!weekScoped) {
+    where.push(aged ? agedOutSql() : inWindowSql());
+    binds.push(win.cutoff);
+  }
+
+  const [rowsRes, weeksRes, olderRes] = await Promise.all([
     env.DB.prepare(
       `SELECT a.id, a.upload_id, a.po_line_id, a.type, a.severity, a.message, a.detail_json, a.resolved, a.detected_at,
               pl.order_date pl_order_date, pl.po_number pl_po, art.article_code pl_article, u.report_date up_report_date
@@ -1377,6 +1394,13 @@ async function handleScopedAnomalies(req: Request, env: Env): Promise<Response> 
        ORDER BY CASE a.severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, a.id DESC LIMIT 1000`,
     ).bind(...binds).all<Record<string, string | number | null>>(),
     env.DB.prepare(`SELECT fiscal_week_code code, week_start, week_end FROM fiscal_weeks`).all<{ code: string; week_start: string; week_end: string }>(),
+    // How many the window is holding back, under the SAME severity/resolved filters
+    // so the toggle's count matches what it reveals.
+    weekScoped
+      ? Promise.resolve({ n: 0 })
+      : env.DB.prepare(`SELECT COUNT(*) n FROM anomalies a WHERE ${olderWhere.join(" AND ")}`)
+          .bind(...binds) // same filters, cutoff last — olderWhere mirrors `where`
+          .first<{ n: number }>(),
   ]);
   const weekMap = new Map((weeksRes.results ?? []).map((w) => [w.code, { start: w.week_start, end: w.week_end }]));
 
@@ -1400,7 +1424,15 @@ async function handleScopedAnomalies(req: Request, env: Env): Promise<Response> 
     });
     if (out.length >= limit) break;
   }
-  return json({ anomalies: out, scoped: !!(from && to), from: from ?? null, to: to ?? null });
+  return json({
+    anomalies: out,
+    scoped: weekScoped,
+    from: from ?? null,
+    to: to ?? null,
+    // Window context for the page header + "Older / aged out" toggle. Null when
+    // week-scoped, where the relevance window does not apply.
+    window: weekScoped ? null : { weeks: win.weeks, cutoff: win.cutoff, aged, olderCount: olderRes?.n ?? 0 },
+  });
 }
 
 /** POST /api/budgets — define or update a spend cap. */
@@ -2050,9 +2082,11 @@ async function handleDashboard(env: Env): Promise<Response> {
           COUNT(*) AS n, COALESCE(SUM(open_value_cents),0) AS value_cents
          FROM po_lines WHERE is_fully_received = 0 GROUP BY bucket`,
       ).all<{ bucket: string; n: number; value_cents: number }>(),
-      // unresolved anomaly counts by severity
+      // Unresolved anomaly counts by severity, inside the relevance window only —
+      // the critical tile must agree with the Risk page's default (windowed) list.
       env.DB.prepare(
-        `SELECT severity, COUNT(*) AS n FROM anomalies WHERE resolved = 0 GROUP BY severity`,
+        `SELECT severity, COUNT(*) AS n FROM anomalies a
+         WHERE a.resolved = 0 AND ${inWindowInlineSql()} GROUP BY severity`,
       ).all<{ severity: string; n: number }>(),
       // Stale orders KPI: open lines 35–59 days old (the flagged window, tightened
       // with the 60-day auto-close). Lines ≥60 days are auto-closed (excluded from
@@ -2063,9 +2097,10 @@ async function handleDashboard(env: Env): Promise<Response> {
            AND order_date <= date('now','-35 days')
            AND order_date >  date('now','-60 days')`,
       ).first<{ n: number }>(),
-      // top open anomalies (severity, then newest)
+      // Top open anomalies (severity, then newest), windowed to match the tile.
       env.DB.prepare(
-        `SELECT id, type, severity, message, detected_at FROM anomalies WHERE resolved = 0
+        `SELECT id, type, severity, message, detected_at FROM anomalies a
+         WHERE a.resolved = 0 AND ${inWindowInlineSql()}
          ORDER BY CASE severity WHEN 'CRITICAL' THEN 0 WHEN 'WARN' THEN 1 ELSE 2 END, id DESC LIMIT 12`,
       ).all(),
       env.DB.prepare(

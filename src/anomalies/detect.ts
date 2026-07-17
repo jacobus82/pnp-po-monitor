@@ -1,4 +1,5 @@
 import type { Env } from "../config";
+import { fillAnomalyRefDates } from "./window";
 import { committedOpenValueCents, type InsertedLine } from "../db/repo";
 import { guidelineKeyForDept, type GuidelineRow } from "../guidelines";
 import type { Anomaly, ParsedFimRow, ParsedGrLine } from "../types";
@@ -444,6 +445,7 @@ export async function recomputeStaleAnomalies(env: Env): Promise<number> {
       ),
     );
   }
+  await fillAnomalyRefDates(env);
   return rows.length;
 }
 
@@ -511,6 +513,7 @@ export async function recomputePriceSpikes(env: Env): Promise<{ seeded: boolean;
     }
     for (let i = 0; i < binds.length; i += 200) await env.DB.batch(binds.slice(i, i + 200));
     raised = binds.length;
+    await fillAnomalyRefDates(env);
   }
 
   // Advance every baseline to the latest price in one set-based statement (only

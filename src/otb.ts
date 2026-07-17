@@ -7,6 +7,7 @@
  * SAME growth/margin assumptions (settings) so they stay consistent.
  */
 import { type Env } from "./config";
+import { fillAnomalyRefDates } from "./anomalies/window";
 import { openPoMaxAgeDays, notAgedOutSql, notManuallyClosedSql } from "./db/repo";
 import { resolveDeptName } from "./departments";
 
@@ -175,5 +176,6 @@ export async function recomputeOtbAnomalies(env: Env): Promise<number> {
       ),
     ));
   }
+  await fillAnomalyRefDates(env);
   return over.length;
 }
